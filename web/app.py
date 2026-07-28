@@ -16,6 +16,9 @@ import datetime as dt
 SECRETS_PATH = Path(__file__).parent / ".streamlit" / "secrets.toml"
 DEFAULT_PASSWORD = "2222"
 ICON_PATH = Path(__file__).parent / "assets" / "kis_icon.png"
+GITHUB_URL = "https://github.com/cheoljoo/hantoo_rest_api"
+OWNER_NAME = "이철주"
+OWNER_EMAIL = "cheoljoo@gmail.com"
 
 
 def load_password() -> str:
@@ -160,7 +163,12 @@ def main():
     if not check_password():
         return
 
+    now = dt.datetime.now()
     st.title("한국투자증권 계좌 대시보드")
+    st.caption(f"기준일 {now.date()} · 생성 {now.strftime('%Y-%m-%dT%H:%M:%S')}")
+    st.caption(
+        f"Owner: {OWNER_NAME} <{OWNER_EMAIL}> · [GitHub ↗]({GITHUB_URL})"
+    )
 
     balance = render_holdings()
     watchlist = render_watchlist()
@@ -171,6 +179,15 @@ def main():
     for w in watchlist:
         code_to_name.setdefault(w.code, w.name or w.code)
     render_candles(list(code_to_name.items()))
+
+    with st.expander("ℹ️ 관리 정보"):
+        st.markdown(
+            f"""
+- **GitHub 저장소**: [{GITHUB_URL}]({GITHUB_URL})
+- **비밀번호 설정 파일**: `web/.streamlit/secrets.toml` (git에는 커밋되지 않음, 서버에서 직접 수정)
+- **Owner**: {OWNER_NAME} <{OWNER_EMAIL}>
+            """
+        )
 
 
 if __name__ == "__main__":
