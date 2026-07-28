@@ -8,6 +8,7 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.auth import get_access_token
 from hantoo_rest_api.config import load_config
+from hantoo_rest_api.market import get_index_snapshots, get_net_flow_ranking
 from hantoo_rest_api.price import get_daily_candles
 from hantoo_rest_api.watchlist import load_watchlist
 
@@ -74,6 +75,60 @@ def _candles(stock_code: str, days: int):
     end_date = dt.date.today()
     start_date = end_date - dt.timedelta(days=days)
     return get_daily_candles(cfg, token, stock_code, start_date=start_date, end_date=end_date)
+
+
+@st.cache_data(ttl=60 * 5)
+def _index_snapshots():
+    cfg, token = _access_token()
+    return get_index_snapshots(cfg, token)
+
+
+@st.cache_data(ttl=60 * 5)
+def _net_flow_ranking():
+    cfg, token = _access_token()
+    return get_net_flow_ranking(cfg, token, top_n=10)
+
+
+def render_market_overview():
+    st.subheader("📈 시장 동향 (Macro)")
+    snapshots = _index_snapshots()
+
+    cols = st.columns(len(snapshots))
+    for col, s in zip(cols, snapshots):
+        col.metric(
+            s.name,
+            f"{s.current:,.2f}",
+            f"{s.change:+,.2f} ({s.change_rate:+.2f}%)",
+        )
+        col.caption(
+            f"상승 {s.advancing} · 하락 {s.declining} · 보합 {s.unchanged}  →  "
+            f"**{s.trend_signal}** (시장폭: {s.breadth_signal})"
+        )
+
+    with st.expander("외국인/기관 순매수 상위 종목 (전체 시장)"):
+        flows = _net_flow_ranking()
+        if not flows:
+            st.info("조회된 데이터가 없습니다.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "종목명": f.name,
+                        "종목코드": f.code,
+                        "현재가": f.current_price,
+                        "등락률(%)": f.change_rate,
+                        "외국인 순매수(주)": f.foreign_net_qty,
+                        "기관 순매수(주)": f.institution_net_qty,
+                    }
+                    for f in flows
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                "장중 집계 기준(증권사 직원 수기 입력, ±10분 오차 가능) — 외국인·기관이 활발히 순매수하는 "
+                "종목이 많을수록 매수 우위 심리로 해석할 수 있습니다."
+            )
 
 
 def render_holdings():
@@ -169,6 +224,8 @@ def main():
     st.caption(
         f"Owner: {OWNER_NAME} <{OWNER_EMAIL}> · [GitHub ↗]({GITHUB_URL})"
     )
+
+    render_market_overview()
 
     balance = render_holdings()
     watchlist = render_watchlist()
