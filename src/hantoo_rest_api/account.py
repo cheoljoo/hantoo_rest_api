@@ -1,0 +1,113 @@
+"""계좌 잔고 조회 (보유 종목, 매입가, 평가손익 등)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import requests
+
+from .config import KisConfig
+
+_INQUIRE_BALANCE_PATH = "/uapi/domestic-stock/v1/trading/inquire-balance"
+
+
+@dataclass(frozen=True)
+class StockHolding:
+    """보유 중인 종목 하나에 대한 정보."""
+
+    code: str  # 종목코드 (pdno)
+    name: str  # 종목명 (prdt_name)
+    quantity: int  # 보유수량 (hldg_qty)
+    avg_purchase_price: float  # 매입평균가격 (pchs_avg_pric)
+    purchase_amount: float  # 매입금액 (pchs_amt)
+    current_price: float  # 현재가 (prpr)
+    eval_amount: float  # 평가금액 (evlu_amt)
+    eval_profit_loss: float  # 평가손익금액 (evlu_pfls_amt)
+    eval_profit_loss_rate: float  # 평가손익율(%) (evlu_pfls_rt)
+
+
+@dataclass(frozen=True)
+class AccountSummary:
+    """계좌 전체 요약 정보."""
+
+    deposit_total: float  # 예수금총금액 (dnca_tot_amt)
+    securities_eval_amount: float  # 유가증권평가금액 (scts_evlu_amt)
+    total_eval_amount: float  # 총평가금액 (tot_evlu_amt)
+    total_purchase_amount: float  # 매입금액합계금액 (pchs_amt_smtl_amt)
+    total_eval_profit_loss: float  # 평가손익합계금액 (evlu_pfls_smtl_amt)
+
+
+@dataclass(frozen=True)
+class AccountBalance:
+    holdings: list[StockHolding]
+    summary: AccountSummary
+
+
+def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
+    return {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {access_token}",
+        "appkey": cfg.app_key,
+        "appsecret": cfg.app_secret,
+        "tr_id": tr_id,
+        "custtype": "P",
+    }
+
+
+def get_account_balance(cfg: KisConfig, access_token: str) -> AccountBalance:
+    """계좌의 보유 종목 및 요약 정보를 조회한다."""
+    tr_id = "VTTC8434R" if cfg.is_virtual else "TTTC8434R"
+
+    params = {
+        "CANO": cfg.account_no,
+        "ACNT_PRDT_CD": cfg.account_product_cd,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+
+    resp = requests.get(
+        f"{cfg.base_url}{_INQUIRE_BALANCE_PATH}",
+        headers=_headers(cfg, access_token, tr_id),
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"잔고 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
+
+    holdings = [
+        StockHolding(
+            code=item["pdno"],
+            name=item["prdt_name"],
+            quantity=int(item["hldg_qty"]),
+            avg_purchase_price=float(item["pchs_avg_pric"]),
+            purchase_amount=float(item["pchs_amt"]),
+            current_price=float(item["prpr"]),
+            eval_amount=float(item["evlu_amt"]),
+            eval_profit_loss=float(item["evlu_pfls_amt"]),
+            eval_profit_loss_rate=float(item["evlu_pfls_rt"]),
+        )
+        for item in data.get("output1", [])
+        if int(item.get("hldg_qty", 0)) > 0
+    ]
+
+    summary_items = data.get("output2", [])
+    summary_item = summary_items[0] if summary_items else {}
+    summary = AccountSummary(
+        deposit_total=float(summary_item.get("dnca_tot_amt", 0)),
+        securities_eval_amount=float(summary_item.get("scts_evlu_amt", 0)),
+        total_eval_amount=float(summary_item.get("tot_evlu_amt", 0)),
+        total_purchase_amount=float(summary_item.get("pchs_amt_smtl_amt", 0)),
+        total_eval_profit_loss=float(summary_item.get("evlu_pfls_smtl_amt", 0)),
+    )
+
+    return AccountBalance(holdings=holdings, summary=summary)

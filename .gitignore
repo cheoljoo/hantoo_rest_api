@@ -215,7 +215,7 @@ marimo/_lsp/
 __marimo__/
 
 # Streamlit
-.streamlit/secrets.toml
+**/.streamlit/secrets.toml
 
 # VS Code MCP config (contains personal access tokens)
 .vscode/mcp.json
