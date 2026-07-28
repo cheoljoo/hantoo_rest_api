@@ -41,6 +41,28 @@ def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
     }
 
 
+def _get_with_retry(
+    url: str, headers: dict[str, str], params: dict[str, str], *, retries: int = 2
+) -> dict:
+    """KIS API가 간헐적으로 5xx/초당거래건수초과를 반환하는 경우를 위한 재시도 래퍼."""
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            time.sleep(0.5 * attempt)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            continue
+        if data.get("rt_cd") != "0":
+            last_error = RuntimeError(f"{data.get('msg_cd')} {data.get('msg1')}")
+            continue
+        return data
+    raise RuntimeError(f"API 호출 실패 ({url}): {last_error}")
+
+
 @dataclass(frozen=True)
 class IndexSnapshot:
     """코스피/코스닥 등 업종 지수의 현재가 및 등락 종목수 스냅샷."""
@@ -81,17 +103,11 @@ def get_index_snapshot(cfg: KisConfig, access_token: str, index_code: str) -> In
         "FID_COND_MRKT_DIV_CODE": "U",
         "FID_INPUT_ISCD": index_code,
     }
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_INDEX_PRICE_PATH}",
-        headers=_headers(cfg, access_token, _INDEX_PRICE_TR_ID),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, _INDEX_PRICE_TR_ID),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if data.get("rt_cd") != "0":
-        raise RuntimeError(f"{index_code} 지수 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
 
     o = data.get("output", {})
     return IndexSnapshot(
@@ -147,17 +163,11 @@ def get_net_flow_ranking(
         "FID_RANK_SORT_CLS_CODE": "0",  # 순매수상위
         "FID_ETC_CLS_CODE": "0",  # 전체
     }
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_FOREIGN_INSTITUTION_TOTAL_PATH}",
-        headers=_headers(cfg, access_token, _FOREIGN_INSTITUTION_TOTAL_TR_ID),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, _FOREIGN_INSTITUTION_TOTAL_TR_ID),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if data.get("rt_cd") != "0":
-        raise RuntimeError(f"외국인/기관 매매동향 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
 
     items = [
         NetFlowItem(
@@ -197,17 +207,11 @@ def get_overseas_index_snapshot(
         "FID_INPUT_DATE_2": end_date.strftime("%Y%m%d"),
         "FID_PERIOD_DIV_CODE": "D",
     }
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_OVERSEAS_INDEX_CHARTPRICE_PATH}",
-        headers=_headers(cfg, access_token, _OVERSEAS_INDEX_CHARTPRICE_TR_ID),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, _OVERSEAS_INDEX_CHARTPRICE_TR_ID),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if data.get("rt_cd") != "0":
-        raise RuntimeError(f"{index_code} 해외지수 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
 
     o = data.get("output1", {})
     return OverseasIndexSnapshot(

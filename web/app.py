@@ -8,6 +8,11 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.auth import get_access_token
 from hantoo_rest_api.config import load_config
+from hantoo_rest_api.global_indices import (
+    get_global_index_snapshots,
+    peripheral_negative_count,
+    peripheral_signal,
+)
 from hantoo_rest_api.market import (
     concentration_signal,
     get_index_snapshots,
@@ -100,35 +105,71 @@ def _overseas_index_snapshots():
     return get_overseas_index_snapshots(cfg, token)
 
 
+@st.cache_data(ttl=60 * 10)
+def _global_index_snapshots():
+    return get_global_index_snapshots()
+
+
 def render_market_overview():
     st.subheader("📈 시장 동향 (Macro)")
-    snapshots = _index_snapshots()
 
-    cols = st.columns(len(snapshots))
-    for col, s in zip(cols, snapshots):
-        col.metric(
-            s.name,
-            f"{s.current:,.2f}",
-            f"{s.change:+,.2f} ({s.change_rate:+.2f}%)",
-        )
-        col.caption(
-            f"상승 {s.advancing} · 하락 {s.declining} · 보합 {s.unchanged}  →  "
-            f"**{s.trend_signal}** (시장폭: {s.breadth_signal})"
-        )
+    try:
+        snapshots = _index_snapshots()
+    except Exception as e:
+        st.warning(f"국내 지수 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
+    else:
+        cols = st.columns(len(snapshots))
+        for col, s in zip(cols, snapshots):
+            col.metric(
+                s.name,
+                f"{s.current:,.2f}",
+                f"{s.change:+,.2f} ({s.change_rate:+.2f}%)",
+            )
+            col.caption(
+                f"상승 {s.advancing} · 하락 {s.declining} · 보합 {s.unchanged}  →  "
+                f"**{s.trend_signal}** (시장폭: {s.breadth_signal})"
+            )
 
     st.markdown("**🌐 글로벌 쏠림(연끌) 신호 — 미국 3대 지수**")
-    overseas = _overseas_index_snapshots()
-    ov_cols = st.columns(len(overseas))
-    for col, s in zip(ov_cols, overseas):
-        col.metric(s.name, f"{s.current:,.2f}", f"{s.change:+,.2f} ({s.change_rate:+.2f}%)")
-    st.caption(
-        f"→ **{concentration_signal(overseas)}**  \n"
-        "(닷컴버블 막판처럼 나스닥만 급등하고 다우/S&P500이 부진하면 시장 자금이 "
-        "소진되고 있다는 경고 신호로 해석 — 자세한 배경은 아래 '시장 방향성 판단 기준' 참고)"
-    )
+    try:
+        overseas = _overseas_index_snapshots()
+    except Exception as e:
+        st.warning(f"미국 지수 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
+    else:
+        ov_cols = st.columns(len(overseas))
+        for col, s in zip(ov_cols, overseas):
+            col.metric(s.name, f"{s.current:,.2f}", f"{s.change:+,.2f} ({s.change_rate:+.2f}%)")
+        st.caption(
+            f"→ **{concentration_signal(overseas)}**  \n"
+            "(닷컴버블 막판처럼 나스닥만 급등하고 다우/S&P500이 부진하면 시장 자금이 "
+            "소진되고 있다는 경고 신호로 해석 — 자세한 배경은 아래 '시장 방향성 판단 기준' 참고)"
+        )
+
+    st.markdown("**🌏 주변국 증시 현황 (글로벌 연끌 확인용)**")
+    try:
+        peripherals = _global_index_snapshots()
+    except Exception as e:
+        st.warning(f"주변국 지수 조회 실패: {e}")
+    else:
+        neg_count, total = peripheral_negative_count(peripherals)
+        p_cols = st.columns(4)
+        for i, s in enumerate(peripherals):
+            col = p_cols[i % 4]
+            col.metric(s.name, f"{s.current:,.2f}", f"{s.change_rate:+.2f}%")
+        st.caption(
+            f"→ 미국 제외 {total}개국 중 **{neg_count}개국 하락 전환** — "
+            f"**{peripheral_signal(peripherals)}**  \n"
+            "(주변국 다수가 동시에 마이너스로 돌아서면 자금이 대장주로만 쏠리는 "
+            "'글로벌 연끌'이 완성 단계에 가까워졌다는 신호)  \n"
+            "데이터 출처: Yahoo Finance(yfinance) — KIS Open API는 미국 3대 지수 외 해외지수를 지원하지 않음"
+        )
 
     with st.expander("외국인/기관 순매수 상위 종목 (전체 시장)"):
-        flows = _net_flow_ranking()
+        try:
+            flows = _net_flow_ranking()
+        except Exception as e:
+            st.warning(f"외국인/기관 매매동향 조회 실패: {e}")
+            flows = []
         if not flows:
             st.info("조회된 데이터가 없습니다.")
         else:
