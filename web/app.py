@@ -8,7 +8,12 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.auth import get_access_token
 from hantoo_rest_api.config import load_config
-from hantoo_rest_api.market import get_index_snapshots, get_net_flow_ranking
+from hantoo_rest_api.market import (
+    concentration_signal,
+    get_index_snapshots,
+    get_net_flow_ranking,
+    get_overseas_index_snapshots,
+)
 from hantoo_rest_api.price import get_daily_candles
 from hantoo_rest_api.watchlist import load_watchlist
 
@@ -89,6 +94,12 @@ def _net_flow_ranking():
     return get_net_flow_ranking(cfg, token, top_n=10)
 
 
+@st.cache_data(ttl=60 * 5)
+def _overseas_index_snapshots():
+    cfg, token = _access_token()
+    return get_overseas_index_snapshots(cfg, token)
+
+
 def render_market_overview():
     st.subheader("📈 시장 동향 (Macro)")
     snapshots = _index_snapshots()
@@ -104,6 +115,17 @@ def render_market_overview():
             f"상승 {s.advancing} · 하락 {s.declining} · 보합 {s.unchanged}  →  "
             f"**{s.trend_signal}** (시장폭: {s.breadth_signal})"
         )
+
+    st.markdown("**🌐 글로벌 쏠림(연끌) 신호 — 미국 3대 지수**")
+    overseas = _overseas_index_snapshots()
+    ov_cols = st.columns(len(overseas))
+    for col, s in zip(ov_cols, overseas):
+        col.metric(s.name, f"{s.current:,.2f}", f"{s.change:+,.2f} ({s.change_rate:+.2f}%)")
+    st.caption(
+        f"→ **{concentration_signal(overseas)}**  \n"
+        "(닷컴버블 막판처럼 나스닥만 급등하고 다우/S&P500이 부진하면 시장 자금이 "
+        "소진되고 있다는 경고 신호로 해석 — 자세한 배경은 아래 '시장 방향성 판단 기준' 참고)"
+    )
 
     with st.expander("외국인/기관 순매수 상위 종목 (전체 시장)"):
         flows = _net_flow_ranking()
@@ -129,6 +151,20 @@ def render_market_overview():
                 "장중 집계 기준(증권사 직원 수기 입력, ±10분 오차 가능) — 외국인·기관이 활발히 순매수하는 "
                 "종목이 많을수록 매수 우위 심리로 해석할 수 있습니다."
             )
+
+    with st.expander("📖 시장 방향성 판단 기준 (김효진 박사 정리)"):
+        st.markdown(
+            """
+대세 상승장이 끝나고 약세장(지수 30~50% 하락)으로 전환될 때 나타나는 대표 신호 3가지:
+
+1. **주도주 역전**: 경쟁사가 핵심 기술 격차를 줄이고 점유율을 빼앗아 이익이 훼손되는 경우 (가장 거리가 먼 시나리오)
+2. **글로벌 연끌(쏠림)**: 대장주(나스닥)만 급등하고 다우/S&P500·유럽·주변국 증시에서 자금이 빠져나갈 때 — 위 "글로벌 쏠림 신호"가 이 부분을 확인하는 지표
+3. **금리 인상 누적 (가장 결정적)**: 금리가 이전 고점을 돌파할 때 밸류에이션이 압착되며 급락 — 현재는 금리 인상 초입이 아니라 동결/인하 논의 국면이라 근거 부족
+
+전체 배경과 실전 체크리스트(삼박자 신호, IPO 품질, 신용융자 금리 등)는
+[`docs/bear_market_signals_kim_hyojin.md`](https://github.com/cheoljoo/hantoo_rest_api/blob/main/docs/bear_market_signals_kim_hyojin.md) 참고.
+            """
+        )
 
 
 def render_holdings():
