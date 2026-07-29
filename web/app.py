@@ -19,6 +19,7 @@ from hantoo_rest_api.global_indices import (
     peripheral_negative_count,
     peripheral_signal,
 )
+from hantoo_rest_api.macro_checklist import build_macro_checklist, get_rate_signal
 from hantoo_rest_api.market import (
     concentration_signal,
     get_index_snapshots,
@@ -122,6 +123,11 @@ def _recent_executions(days: int):
     return get_recent_executions(cfg, token, days=days)
 
 
+@st.cache_data(ttl=60 * 30)
+def _rate_signal():
+    return get_rate_signal()
+
+
 def render_market_overview():
     st.subheader("📈 시장 동향 (Macro)")
 
@@ -143,6 +149,7 @@ def render_market_overview():
             )
 
     st.markdown("**🌐 글로벌 쏠림(연끌) 신호 — 미국 3대 지수**")
+    overseas = None
     try:
         overseas = _overseas_index_snapshots()
     except Exception as e:
@@ -158,6 +165,7 @@ def render_market_overview():
         )
 
     st.markdown("**🌏 주변국 증시 현황 (글로벌 연끌 확인용)**")
+    peripherals = None
     try:
         peripherals = _global_index_snapshots()
     except Exception as e:
@@ -175,6 +183,26 @@ def render_market_overview():
             "'글로벌 연끌'이 완성 단계에 가까워졌다는 신호)  \n"
             "데이터 출처: Yahoo Finance(yfinance) — KIS Open API는 미국 3대 지수 외 해외지수를 지원하지 않음"
         )
+
+    st.markdown("**✅ 삼박자 약세장 체크리스트 (금리 · 글로벌 쏠림 · 부실 IPO)**")
+    if overseas is None or peripherals is None:
+        st.info("위 지표 조회가 실패해 체크리스트를 계산할 수 없습니다.")
+    else:
+        try:
+            rate = _rate_signal()
+        except Exception as e:
+            st.warning(f"미국 10년물 금리 조회 실패: {e}")
+        else:
+            checklist = build_macro_checklist(overseas, peripherals, rate)
+            for item in checklist.items:
+                mark = "🔴" if item.triggered else ("⚪" if not item.automated else "🟢")
+                st.write(f"{mark} {item.label}  \n　　{item.detail}")
+            st.markdown(f"### {checklist.verdict}")
+            st.caption(
+                "①②는 실시간 데이터로 자동 판정, ③은 대형 IPO 뉴스를 직접 확인해야 합니다. "
+                "삼박자가 모두 충족되면 욕심을 버리고 3~5등분 기계적 분할매도를, 신호가 없으면 "
+                "분할매수를 검토하는 것이 김효진 박사의 원칙입니다."
+            )
 
     with st.expander("외국인/기관 순매수 상위 종목 (전체 시장)"):
         try:
