@@ -6,6 +6,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from hantoo_rest_api.account import get_account_balance
+from hantoo_rest_api.account_activity import (
+    diversification_score,
+    get_recent_executions,
+    investment_style_signal,
+    summarize_trading_activity,
+)
 from hantoo_rest_api.auth import get_access_token
 from hantoo_rest_api.config import load_config
 from hantoo_rest_api.global_indices import (
@@ -108,6 +114,12 @@ def _overseas_index_snapshots():
 @st.cache_data(ttl=60 * 10)
 def _global_index_snapshots():
     return get_global_index_snapshots()
+
+
+@st.cache_data(ttl=60 * 30)
+def _recent_executions(days: int):
+    cfg, token = _access_token()
+    return get_recent_executions(cfg, token, days=days)
 
 
 def render_market_overview():
@@ -241,6 +253,29 @@ def render_holdings():
     return balance
 
 
+def render_investment_style(balance):
+    st.subheader("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)")
+    st.caption(
+        "실증 연구(자본시장연구원 개인투자자 성과 분석 등)에서 상대적으로 좋은 성과를 보인 "
+        "패턴은 '분산 + 장기 보유 + 저빈도 매매'입니다. 내 계좌를 이 기준으로 비교합니다."
+    )
+
+    hhi, top_weight_pct = diversification_score(balance.holdings)
+    try:
+        executions = _recent_executions(90)
+    except Exception as e:
+        st.warning(f"최근 체결 내역 조회 실패: {e}")
+        executions = []
+    activity = summarize_trading_activity(executions, 90)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("최근 90일 매매 건수", f"{activity.trade_count}건", f"매수 {activity.buy_count} / 매도 {activity.sell_count}")
+    col2.metric("월평균 매매빈도", f"{activity.trades_per_month:.1f}건/월")
+    col3.metric("최대 종목 비중", f"{top_weight_pct:.1f}%", f"보유 {len(balance.holdings)}종목, HHI {hhi:.2f}")
+
+    st.markdown(f"→ **{investment_style_signal(activity, hhi)}**")
+
+
 WATCHLIST_PATH = Path(__file__).parent.parent / "watchlist.yaml"
 
 
@@ -305,6 +340,7 @@ def main():
     render_market_overview()
 
     balance = render_holdings()
+    render_investment_style(balance)
     watchlist = render_watchlist()
 
     code_to_name: dict[str, str] = {}
