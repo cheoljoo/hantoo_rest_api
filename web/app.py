@@ -26,14 +26,18 @@ from hantoo_rest_api.account_activity import (
     summarize_trading_activity,
 )
 from hantoo_rest_api.auth import get_access_token
-from hantoo_rest_api.config import load_config
+from hantoo_rest_api.config import KisConfig, load_configs
 from hantoo_rest_api.global_indices import (
     get_global_index_snapshots,
     peripheral_negative_count,
     peripheral_signal,
 )
 from hantoo_rest_api.macro_checklist import build_macro_checklist, get_rate_signal
-from hantoo_rest_api.manual_transactions import load_manual_transactions, per_stock_summary
+from hantoo_rest_api.manual_transactions import (
+    filter_by_account,
+    load_manual_transactions,
+    per_stock_summary,
+)
 from hantoo_rest_api.market import (
     concentration_signal,
     get_index_snapshots,
@@ -100,53 +104,57 @@ def check_password() -> bool:
 
 
 @st.cache_resource(ttl=60 * 60 * 6)
-def _access_token():
-    """`(KisConfig, access_token)` 튜플을 세션 전체에서 공유 캐시한다.
+def _access_token(cfg: KisConfig) -> str:
+    """`get_access_token(cfg)`의 결과를 계좌(cfg)별로 세션 전체에서 공유 캐시한다.
 
     `get_access_token` 자체도 파일 캐싱을 하지만, 그와 별개로 Streamlit
-    프로세스 안에서 매 위젯 상호작용(리런)마다 `.env`를 다시 읽고 캐시
-    파일을 여는 오버헤드를 없애기 위해 한 번 더 캐시한다.
+    프로세스 안에서 매 위젯 상호작용(리런)마다 캐시 파일을 여는 오버헤드를
+    없애기 위해 한 번 더 캐시한다. `KisConfig`는 frozen dataclass라 그
+    자체를 캐시 키로 써도(값 기반 해시) 안전하다 — 계좌가 여러 개여도
+    각 계좌(cfg)마다 독립된 캐시 항목을 갖는다.
     """
-    cfg = load_config()
-    return cfg, get_access_token(cfg)
+    return get_access_token(cfg)
 
 
 @st.cache_data(ttl=60)
-def _account_balance():
+def _account_balance(cfg: KisConfig):
     """`get_account_balance` 캐시. 60초 TTL — 계좌 잔고는 실시간성이 가장
     중요한 데이터라 다른 시세성 데이터보다 짧게 캐시한다."""
-    cfg, token = _access_token()
+    token = _access_token(cfg)
     return get_account_balance(cfg, token)
 
 
 @st.cache_data(ttl=60 * 5)
-def _candles(stock_code: str, days: int):
-    """`get_daily_candles` 캐시. `(stock_code, days)` 조합별로 별도 캐시되므로
-    캔들차트의 종목 선택 셀렉트박스를 바꿔도 이전에 조회한 종목은 재요청하지 않는다."""
-    cfg, token = _access_token()
+def _candles(cfg: KisConfig, stock_code: str, days: int):
+    """`get_daily_candles` 캐시. `(cfg, stock_code, days)` 조합별로 별도
+    캐시되므로 캔들차트의 종목 선택 셀렉트박스를 바꿔도 이전에 조회한
+    종목은 재요청하지 않는다."""
+    token = _access_token(cfg)
     end_date = dt.date.today()
     start_date = end_date - dt.timedelta(days=days)
     return get_daily_candles(cfg, token, stock_code, start_date=start_date, end_date=end_date)
 
 
 @st.cache_data(ttl=60 * 5)
-def _index_snapshots():
-    """`get_index_snapshots`(코스피/코스닥) 캐시."""
-    cfg, token = _access_token()
+def _index_snapshots(cfg: KisConfig):
+    """`get_index_snapshots`(코스피/코스닥) 캐시. 시장 전체 데이터라 계좌와
+    무관하지만, 유효한 토큰이 필요해 대표 계좌(`cfg`, 보통 첫 번째 계좌)의
+    자격증명을 빌려 쓴다."""
+    token = _access_token(cfg)
     return get_index_snapshots(cfg, token)
 
 
 @st.cache_data(ttl=60 * 5)
-def _net_flow_ranking():
+def _net_flow_ranking(cfg: KisConfig):
     """`get_net_flow_ranking`(외국인/기관 순매수 상위 종목) 캐시."""
-    cfg, token = _access_token()
+    token = _access_token(cfg)
     return get_net_flow_ranking(cfg, token, top_n=10)
 
 
 @st.cache_data(ttl=60 * 5)
-def _overseas_index_snapshots():
+def _overseas_index_snapshots(cfg: KisConfig):
     """`get_overseas_index_snapshots`(다우/나스닥/S&P500) 캐시."""
-    cfg, token = _access_token()
+    token = _access_token(cfg)
     return get_overseas_index_snapshots(cfg, token)
 
 
@@ -163,16 +171,16 @@ def _global_index_snapshots():
 
 
 @st.cache_data(ttl=60 * 30)
-def _recent_executions(days: int):
+def _recent_executions(cfg: KisConfig, days: int):
     """`get_recent_executions` 캐시. 체결내역은 자주 바뀌지 않아 30분으로 길게 캐시."""
-    cfg, token = _access_token()
+    token = _access_token(cfg)
     return get_recent_executions(cfg, token, days=days)
 
 
 @st.cache_data(ttl=60)
-def _pension_deposit():
+def _pension_deposit(cfg: KisConfig):
     """`get_pension_deposit` 캐시. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
-    cfg, token = _access_token()
+    token = _access_token(cfg)
     return get_pension_deposit(cfg, token)
 
 
@@ -183,8 +191,13 @@ def _rate_signal():
     return get_rate_signal()
 
 
-def render_market_overview():
+def render_market_overview(cfg: KisConfig):
     """"📈 시장 동향 (Macro)" 섹션 전체를 렌더링한다.
+
+    시장 전체 데이터라 특정 계좌에 종속되지 않지만, KIS API 호출에는 유효한
+    토큰이 필요하므로 `cfg`(보통 계좌 목록의 첫 번째, 대표 계좌)의 자격증명을
+    빌려 쓴다 — 계좌를 여러 개 등록했어도 이 섹션은 계좌별로 반복 렌더링하지
+    않고 한 번만 그린다.
 
     구성(위→아래): 코스피/코스닥 지수+시장폭 → 미국 3대 지수 쏠림 신호 →
     주변국 8개국 지수(글로벌 연끌 확인용) → 위 셋을 조합한 삼박자 약세장
@@ -196,7 +209,7 @@ def render_market_overview():
     st.subheader("📈 시장 동향 (Macro)")
 
     try:
-        snapshots = _index_snapshots()
+        snapshots = _index_snapshots(cfg)
     except Exception as e:
         st.warning(f"국내 지수 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
     else:
@@ -215,7 +228,7 @@ def render_market_overview():
     st.markdown("**🌐 글로벌 쏠림(연끌) 신호 — 미국 3대 지수**")
     overseas = None
     try:
-        overseas = _overseas_index_snapshots()
+        overseas = _overseas_index_snapshots(cfg)
     except Exception as e:
         st.warning(f"미국 지수 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
     else:
@@ -270,7 +283,7 @@ def render_market_overview():
 
     with st.expander("외국인/기관 순매수 상위 종목 (전체 시장)"):
         try:
-            flows = _net_flow_ranking()
+            flows = _net_flow_ranking(cfg)
         except Exception as e:
             st.warning(f"외국인/기관 매매동향 조회 실패: {e}")
             flows = []
@@ -312,12 +325,20 @@ def render_market_overview():
         )
 
 
-def render_holdings():
+def render_holdings(cfg: KisConfig):
     """"보유 종목" 섹션(표 + 계좌 요약 지표)을 렌더링하고, 이후 렌더 함수들이
-    재사용할 수 있도록 조회한 `AccountBalance`를 그대로 반환한다.
+    재사용할 수 있도록 조회한 `AccountBalance`를 반환한다 (조회 실패 시 None).
+
+    계좌를 여러 개 등록했을 때 한 계좌의 인증 실패/API 오류가 다른 계좌 탭까지
+    끌고 내려가지 않도록 여기서 예외를 잡는다 — 잡지 않으면 `st.tabs` 안에서
+    발생한 예외가 스크립트 전체 실행을 중단시켜 다른 탭도 같이 깨진다.
     """
     st.subheader("보유 종목")
-    balance = _account_balance()
+    try:
+        balance = _account_balance(cfg)
+    except Exception as e:
+        st.error(f"계좌 조회 실패 ({cfg.display_label}): {e}")
+        return None
     if not balance.holdings:
         st.info("보유 중인 종목이 없습니다.")
     else:
@@ -348,7 +369,7 @@ def render_holdings():
     return balance
 
 
-def render_investment_style(balance):
+def render_investment_style(cfg: KisConfig, balance):
     """"🧭 내 투자 스타일 진단" + "💰 예수금 현황" 섹션을 렌더링한다.
 
     `is_pension_account(cfg)`로 계좌 유형을 판별해 두 갈래로 동작한다:
@@ -363,10 +384,9 @@ def render_investment_style(balance):
     )
 
     hhi, top_weight_pct = diversification_score(balance.holdings)
-    cfg, _ = _access_token()
     pension = is_pension_account(cfg)
     try:
-        executions = _recent_executions(90)
+        executions = _recent_executions(cfg, 90)
     except Exception as e:
         st.warning(f"최근 체결 내역 조회 실패: {e}")
         executions = []
@@ -388,7 +408,7 @@ def render_investment_style(balance):
     st.markdown("**💰 예수금 현황** (거래내역이 아닌 현재 잔액 스냅샷)")
     if pension:
         try:
-            deposit = _pension_deposit()
+            deposit = _pension_deposit(cfg)
         except Exception as e:
             st.warning(f"퇴직연금 예수금 조회 실패: {e}")
         else:
@@ -411,21 +431,25 @@ def render_investment_style(balance):
 TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
 
 
-def render_manual_transactions():
+def render_manual_transactions(cfg: KisConfig):
     """"📝 매매 내역 (수동 기록)" 섹션 — `transactions.yaml`(git에는 커밋되지
     않는 개인 파일, 형식은 `transactions.yaml.example` 참고)에 사용자가 직접
-    기록한 매매를 매수/매도 시계열 막대그래프 + 종목별 매수/매도 비교 표 +
-    전체 원장(접이식)으로 보여준다. KIS API가 체결내역을 제공하지 않는
-    계좌(퇴직연금 DC형 등)를 보완하기 위한 섹션이다.
+    기록한 매매를, 이 계좌(`cfg.account_no`)에 해당하는 것만 골라 매수/매도
+    시계열 막대그래프 + 종목별 매수/매도 비교 표 + 전체 원장(접이식)으로
+    보여준다. `account_no`를 적지 않은 기록은 모든 계좌 탭에 공통 표시된다
+    (`manual_transactions.filter_by_account` 참고). KIS API가 체결내역을
+    제공하지 않는 계좌(퇴직연금 DC형 등)를 보완하기 위한 섹션이다.
     """
     st.subheader("📝 매매 내역 (수동 기록)")
     st.caption(
         "퇴직연금 등 KIS Open API가 체결내역을 제공하지 않는 계좌를 위해, "
-        f"`{TRANSACTIONS_PATH.name}`에 직접 기록한 매매 내역입니다."
+        f"`{TRANSACTIONS_PATH.name}`에 직접 기록한 매매 내역입니다 "
+        "(계좌를 구분하지 않고 적은 기록은 모든 계좌 탭에 함께 표시됩니다)."
     )
-    transactions = load_manual_transactions(TRANSACTIONS_PATH)
+    all_transactions = load_manual_transactions(TRANSACTIONS_PATH)
+    transactions = filter_by_account(all_transactions, cfg.account_no)
     if not transactions:
-        st.info(f"{TRANSACTIONS_PATH.name}에 기록된 매매 내역이 없습니다.")
+        st.info(f"{TRANSACTIONS_PATH.name}에 이 계좌로 기록된 매매 내역이 없습니다.")
         return
 
     fig = go.Figure()
@@ -500,12 +524,14 @@ def render_watchlist():
     return watchlist
 
 
-def render_candles(codes: list[tuple[str, str]]):
-    """"캔들 차트" 섹션 — `codes`(보유종목+관심종목 합친 (코드, 이름) 목록)
-    중 하나를 셀렉트박스로 골라 plotly 캔들스틱으로 그린다.
+def render_candles(cfg: KisConfig, codes: list[tuple[str, str]]):
+    """"캔들 차트" 섹션 — `codes`(모든 계좌의 보유종목+관심종목 합친 (코드, 이름)
+    목록) 중 하나를 셀렉트박스로 골라 plotly 캔들스틱으로 그린다.
 
-    조회 실패(KIS 서버 5xx 등)를 여기서 잡아 경고만 띄우고 함수가 조기
-    반환하도록 해, 캔들 데이터 하나 때문에 페이지 전체가 죽지 않게 한다.
+    시세 조회 자체는 계좌와 무관하지만 유효한 토큰이 필요해 대표 계좌
+    (`cfg`, 보통 첫 번째 계좌)의 자격증명을 빌려 쓴다. 조회 실패(KIS 서버
+    5xx 등)를 여기서 잡아 경고만 띄우고 함수가 조기 반환하도록 해, 캔들
+    데이터 하나 때문에 페이지 전체가 죽지 않게 한다.
     """
     st.subheader("캔들 차트")
     if not codes:
@@ -518,7 +544,7 @@ def render_candles(codes: list[tuple[str, str]]):
     code, name = codes[labels.index(selected)]
 
     try:
-        candles = _candles(code, days)
+        candles = _candles(cfg, code, days)
     except Exception as e:
         st.warning(f"{name}({code}) 캔들 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
         return
@@ -548,13 +574,31 @@ def render_candles(codes: list[tuple[str, str]]):
     st.plotly_chart(fig, width="stretch")
 
 
+def render_account_section(cfg: KisConfig):
+    """계좌 하나에 대한 "보유 종목 + 투자 스타일 진단 + 수동 매매기록"을
+    묶어서 렌더링하고, 캔들차트 종목 선택지 구성에 쓸 `AccountBalance`를
+    반환한다 (계좌 조회 자체가 실패했으면 None — 이후 두 섹션은 건너뛴다).
+    """
+    balance = render_holdings(cfg)
+    if balance is None:
+        return None
+    render_investment_style(cfg, balance)
+    render_manual_transactions(cfg)
+    return balance
+
+
 def main():
     """페이지 설정 → 비밀번호 게이트 → 각 섹션을 순서대로 렌더링하는 앱 엔트리포인트.
 
-    렌더링 순서(시장 동향 → 보유종목 → 투자스타일 진단 → 수동 매매기록 →
-    관심종목 → 캔들차트)는 "계좌 확인 전에 먼저 매크로 상황을 보여준다"는
-    의도로 배치했다. 마지막 "ℹ️ 관리 정보" 접이식 패널은 이 화면과 무관한
-    저장소/설정 정보라 항상 맨 아래 둔다.
+    렌더링 순서(시장 동향 → 계좌 섹션 → 관심종목 → 캔들차트)는 "계좌 확인 전에
+    먼저 매크로 상황을 보여준다"는 의도로 배치했다. 계좌가 여러 개면(`.env`에
+    `KIS_APP_KEY_2` 등으로 추가 등록, `config.load_configs` 참고) 계좌별로
+    `st.tabs`를 그려 각 탭에서 독립적으로 보유종목/투자스타일/수동매매기록을
+    보여주고, 계좌가 1개뿐이면 탭 없이 바로 보여준다. 시장 동향/캔들차트는
+    계좌에 종속되지 않는 공용 섹션이라 탭 밖에서 한 번만 그린다(캔들차트의
+    종목 선택지는 모든 계좌의 보유종목 + 관심종목을 합친 목록). 마지막
+    "ℹ️ 관리 정보" 접이식 패널은 이 화면과 무관한 저장소/설정 정보라 항상
+    맨 아래 둔다.
     """
     st.set_page_config(page_title="hantoo", page_icon=str(ICON_PATH), layout="wide")
     if not check_password():
@@ -567,19 +611,32 @@ def main():
         f"Owner: {OWNER_NAME} <{OWNER_EMAIL}> · [GitHub ↗]({GITHUB_URL})"
     )
 
-    render_market_overview()
+    configs = load_configs()
+    primary_cfg = configs[0]
 
-    balance = render_holdings()
-    render_investment_style(balance)
-    render_manual_transactions()
+    render_market_overview(primary_cfg)
+
+    all_holdings = []
+    if len(configs) == 1:
+        balance = render_account_section(configs[0])
+        if balance is not None:
+            all_holdings.extend(balance.holdings)
+    else:
+        tabs = st.tabs([c.display_label for c in configs])
+        for tab, cfg in zip(tabs, configs):
+            with tab:
+                balance = render_account_section(cfg)
+                if balance is not None:
+                    all_holdings.extend(balance.holdings)
+
     watchlist = render_watchlist()
 
     code_to_name: dict[str, str] = {}
-    for h in balance.holdings:
+    for h in all_holdings:
         code_to_name.setdefault(h.code, h.name)
     for w in watchlist:
         code_to_name.setdefault(w.code, w.name or w.code)
-    render_candles(list(code_to_name.items()))
+    render_candles(primary_cfg, list(code_to_name.items()))
 
     with st.expander("ℹ️ 관리 정보"):
         st.markdown(

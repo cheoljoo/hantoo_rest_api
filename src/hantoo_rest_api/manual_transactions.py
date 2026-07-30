@@ -1,7 +1,10 @@
 """KIS Open API가 체결내역을 제공하지 않는 계좌(예: 퇴직연금 DC형)를 위해,
 사용자가 직접 기록한 매매 내역을 관리한다.
 
-transactions.yaml (레포 루트)에 아래 형식으로 기록한다:
+transactions.yaml (레포 루트)에 아래 형식으로 기록한다. 계좌를 여러 개 쓰는
+경우 `account_no`(계좌번호)를 적으면 웹 대시보드의 해당 계좌 탭에서만
+표시된다 — 비워두면 모든 계좌 탭에 공통으로 표시된다(과거 단일 계좌
+기록과의 하위 호환을 위한 기본 동작).
 
 transactions:
   - date: "2026-07-24"
@@ -10,6 +13,7 @@ transactions:
     side: "매도"
     quantity: 20
     price: 1073625
+    account_no: "12345678"  # 선택. 생략하면 모든 계좌 탭에 표시됨
     note: "API로 조회되지 않아 수동 기록"
 """
 
@@ -34,6 +38,7 @@ class ManualTransaction:
     side: str  # "매수" / "매도"
     quantity: int
     price: float
+    account_no: str = ""  # 비어있으면 모든 계좌 탭에 공통 표시
     note: str = ""
 
     @property
@@ -68,11 +73,24 @@ def load_manual_transactions(
                 side=item["side"],
                 quantity=int(item["quantity"]),
                 price=float(item.get("price", 0)),
+                account_no=str(item.get("account_no", "")),
                 note=item.get("note", ""),
             )
         )
     items.sort(key=lambda t: t.date)
     return items
+
+
+def filter_by_account(
+    transactions: list[ManualTransaction], account_no: str
+) -> list[ManualTransaction]:
+    """계좌번호로 매매 내역을 걸러낸다.
+
+    `account_no`가 비어있는 항목(과거 단일 계좌 시절 기록, 또는 계좌 구분이
+    필요 없는 기록)은 어느 계좌를 조회하든 항상 포함시킨다 — 계좌를 여러 개로
+    확장했다고 해서 기존에 기록해둔 데이터가 안 보이게 되는 상황을 막기 위함이다.
+    """
+    return [t for t in transactions if not t.account_no or t.account_no == account_no]
 
 
 def per_stock_summary(transactions: list[ManualTransaction]) -> list[dict]:

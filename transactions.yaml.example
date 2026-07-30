@@ -7,4 +7,5 @@ transactions:
     side: "매도"  # "매수" 또는 "매도"
     quantity: 20
     price: 1073625
+    account_no: "12345678"  # 선택. 계좌를 여러 개 쓸 때만 채우면 됨 (생략 시 모든 계좌 탭에 표시)
     note: "API로 조회되지 않아 수동 기록"
