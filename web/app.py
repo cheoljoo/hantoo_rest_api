@@ -376,15 +376,24 @@ def render_holdings(cfg: KisConfig):
         except Exception as e:
             st.warning(f"퇴직연금 예수금 조회 실패: {e}")
         else:
+            # 퇴직연금 전용 예수금조회(deposit)는 "지금 바로 쓸 수 있는 현금" 기준값을
+            # 주고, 일반 잔고조회(s)의 D+1/D+2는 최근 매매가 결제되면서 추가로
+            # 들어올 금액을 알려준다 — 이 계좌는 두 API가 서로 다른 것을 보여주므로
+            # 실제 D/D+1/D+2 총액은 둘을 더해야 나온다(사용자 확인).
             d_col1, d_col2, d_col3 = st.columns(3)
-            d_col1.metric("D (예수금총액)", f"{deposit.deposit_total:,.0f}")
-            d_col2.metric("D+1 (익일 인출가능)", f"{deposit.next_day_withdrawable:,.0f}")
-            d_col3.metric("익일/익2일 정산예정", f"{deposit.next_day_settlement:,.0f} / {deposit.next_2day_settlement:,.0f}")
+            d_col1.metric("D (예수금총액)", f"{deposit.deposit_total + s.deposit_total:,.0f}")
+            d_col2.metric(
+                "D+1 (익일 인출가능)",
+                f"{deposit.next_day_withdrawable + s.next_day_withdrawable:,.0f}",
+            )
+            d_col3.metric(
+                "D+2 (최종 인출가능)",
+                f"{deposit.next_day_withdrawable + s.next_2day_withdrawable:,.0f}",
+            )
             st.caption(
-                "퇴직연금(DC형) 계좌는 일반 잔고조회 API의 예수금 필드가 0으로 나와 "
-                "퇴직연금 전용 예수금조회 API 값을 사용합니다. CMA(현금성 자산)는 "
-                "이 API에서 제공되지 않습니다. 마지막 값은 D+2 시점의 총 인출가능금액이 "
-                "아니라 추가로 정산되어 들어올 예정 금액(델타)입니다."
+                "퇴직연금(DC형) 계좌는 '지금 바로 쓸 수 있는 현금'(전용 예수금조회 API)과 "
+                "'매매 결제로 추가 반영되는 금액'(일반 잔고조회 API의 D+1/D+2)을 합산한 "
+                "값입니다. CMA(현금성 자산)는 전용 API에 없어 제공되지 않습니다."
             )
     else:
         col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
