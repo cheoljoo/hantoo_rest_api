@@ -222,3 +222,6 @@ __marimo__/
 
 # /todo-list, /todo-done, /todo-all 실행 결과 덤프 (내용이 길어질 수 있어 git에는 남기지 않음)
 todo/output/
+
+# 수동 매매 기록 (실제 거래 수량/금액 등 민감한 개인 금융정보 - public 저장소에 커밋하지 않음)
+transactions.yaml

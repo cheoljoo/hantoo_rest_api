@@ -22,6 +22,7 @@ from hantoo_rest_api.global_indices import (
     peripheral_signal,
 )
 from hantoo_rest_api.macro_checklist import build_macro_checklist, get_rate_signal
+from hantoo_rest_api.manual_transactions import load_manual_transactions, per_stock_summary
 from hantoo_rest_api.market import (
     concentration_signal,
     get_index_snapshots,
@@ -342,6 +343,79 @@ def render_investment_style(balance):
         )
 
 
+TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
+
+
+def render_manual_transactions():
+    st.subheader("📝 매매 내역 (수동 기록)")
+    st.caption(
+        "퇴직연금 등 KIS Open API가 체결내역을 제공하지 않는 계좌를 위해, "
+        f"`{TRANSACTIONS_PATH.name}`에 직접 기록한 매매 내역입니다."
+    )
+    transactions = load_manual_transactions(TRANSACTIONS_PATH)
+    if not transactions:
+        st.info(f"{TRANSACTIONS_PATH.name}에 기록된 매매 내역이 없습니다.")
+        return
+
+    fig = go.Figure()
+    for side, color in [("매수", "#d62728"), ("매도", "#1f77b4")]:
+        side_txs = [t for t in transactions if t.side == side]
+        if not side_txs:
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=[t.date for t in side_txs],
+                y=[t.amount for t in side_txs],
+                name=side,
+                marker_color=color,
+                text=[f"{t.name} {t.quantity}주" for t in side_txs],
+            )
+        )
+    fig.update_layout(
+        title="매매 시계열 (거래대금)",
+        xaxis_title="날짜",
+        yaxis_title="거래대금",
+        height=350,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.markdown("**종목별 매매 비교**")
+    st.dataframe(
+        [
+            {
+                "종목명": s["name"],
+                "종목코드": s["code"],
+                "매수금액": s["buy_amount"],
+                "매도금액": s["sell_amount"],
+                "순매수금액": s["net_amount"],
+                "매매횟수": s["trade_count"],
+            }
+            for s in per_stock_summary(transactions)
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+    with st.expander("전체 매매 기록 원장"):
+        st.dataframe(
+            [
+                {
+                    "날짜": t.date,
+                    "종목명": t.name,
+                    "종목코드": t.code,
+                    "구분": t.side,
+                    "수량": t.quantity,
+                    "단가": t.price,
+                    "거래대금": t.amount,
+                    "메모": t.note,
+                }
+                for t in transactions
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+
 WATCHLIST_PATH = Path(__file__).parent.parent / "watchlist.yaml"
 
 
@@ -411,6 +485,7 @@ def main():
 
     balance = render_holdings()
     render_investment_style(balance)
+    render_manual_transactions()
     watchlist = render_watchlist()
 
     code_to_name: dict[str, str] = {}

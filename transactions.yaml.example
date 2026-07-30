@@ -1,0 +1,10 @@
+# transactions.yaml 파일명으로 복사해서 사용하세요 (transactions.yaml은 .gitignore에 등록되어 커밋되지 않음).
+# KIS Open API가 체결내역을 제공하지 않는 계좌(예: 퇴직연금 DC형)의 매매 내역을 직접 기록합니다.
+transactions:
+  - date: "2026-07-24"
+    code: "459580"
+    name: "KODEX CD금리액티브(합성)"
+    side: "매도"  # "매수" 또는 "매도"
+    quantity: 20
+    price: 1073625
+    note: "API로 조회되지 않아 수동 기록"
