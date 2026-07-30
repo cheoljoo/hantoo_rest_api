@@ -8,8 +8,10 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.account_activity import (
     diversification_score,
+    get_pension_deposit,
     get_recent_executions,
     investment_style_signal,
+    is_pension_account,
     summarize_trading_activity,
 )
 from hantoo_rest_api.auth import get_access_token
@@ -121,6 +123,12 @@ def _global_index_snapshots():
 def _recent_executions(days: int):
     cfg, token = _access_token()
     return get_recent_executions(cfg, token, days=days)
+
+
+@st.cache_data(ttl=60)
+def _pension_deposit():
+    cfg, token = _access_token()
+    return get_pension_deposit(cfg, token)
 
 
 @st.cache_data(ttl=60 * 30)
@@ -289,6 +297,8 @@ def render_investment_style(balance):
     )
 
     hhi, top_weight_pct = diversification_score(balance.holdings)
+    cfg, _ = _access_token()
+    pension = is_pension_account(cfg)
     try:
         executions = _recent_executions(90)
     except Exception as e:
@@ -301,7 +311,35 @@ def render_investment_style(balance):
     col2.metric("월평균 매매빈도", f"{activity.trades_per_month:.1f}건/월")
     col3.metric("최대 종목 비중", f"{top_weight_pct:.1f}%", f"보유 {len(balance.holdings)}종목, HHI {hhi:.2f}")
 
-    st.markdown(f"→ **{investment_style_signal(activity, hhi)}**")
+    st.markdown(f"→ **{investment_style_signal(activity, hhi, data_reliable=not pension)}**")
+    if pension:
+        st.caption(
+            "⚠️ 퇴직연금(DC형) 계좌는 KIS Open API의 체결내역 조회 API(일반/퇴직연금/실현손익 전부)가 "
+            "'조회할 내용이 없음'만 반환해, 실제 매매가 있었어도 위 매매 건수는 항상 0으로 나옵니다 — "
+            "이 계좌 유형의 API 한계이며, 보유 종목·평가금액은 정상적으로 반영됩니다."
+        )
+
+    st.markdown("**💰 예수금 현황** (거래내역이 아닌 현재 잔액 스냅샷)")
+    if pension:
+        try:
+            deposit = _pension_deposit()
+        except Exception as e:
+            st.warning(f"퇴직연금 예수금 조회 실패: {e}")
+        else:
+            d_col1, d_col2, d_col3 = st.columns(3)
+            d_col1.metric("예수금총액", f"{deposit.deposit_total:,.0f}")
+            d_col2.metric("익일정산금액", f"{deposit.next_day_settlement:,.0f}")
+            d_col3.metric("익2일정산금액", f"{deposit.next_2day_settlement:,.0f}")
+            st.caption(
+                "퇴직연금 계좌는 KIS Open API가 입출금 이력(언제 얼마가 들어오고 나갔는지)은 "
+                "제공하지 않고, 이 현재 잔액 스냅샷만 제공합니다. 상세 입출금 내역은 HTS/MTS 앱의 "
+                "계좌 조회 화면에서 확인해야 합니다."
+            )
+    else:
+        st.caption(
+            "일반 계좌의 예수금총액/총평가금액은 위 '보유 종목' 섹션의 계좌 요약 지표를 참고하세요. "
+            "다만 이 저장소 기준으로는 예수금의 입출금 이력(거래일자별 상세 내역) 조회 API를 확인하지 못했습니다."
+        )
 
 
 WATCHLIST_PATH = Path(__file__).parent.parent / "watchlist.yaml"

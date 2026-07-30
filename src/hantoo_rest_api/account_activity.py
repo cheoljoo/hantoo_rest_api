@@ -14,7 +14,13 @@ from .config import KisConfig
 
 _DAILY_CCLD_PATH = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
 _PENSION_DAILY_CCLD_PATH = "/uapi/domestic-stock/v1/trading/pension/inquire-daily-ccld"
+_PENSION_DEPOSIT_PATH = "/uapi/domestic-stock/v1/trading/pension/inquire-deposit"
 _PENSION_ACCOUNT_ERROR_CODE = "APBK1744"  # "퇴직연금계좌는 해당 서비스가 불가합니다"
+
+# 퇴직연금 DC형(상품코드 55) 계좌는 실측 결과 일반/퇴직연금용 체결내역 API가 모두
+# "조회할 내용이 없습니다"류의 빈 응답만 반환한다 (실제 매매가 있었음에도). 즉 이
+# 계좌 유형은 KIS Open API로 매매 체결내역 자체를 제공하지 않는 것으로 보인다.
+PENSION_DC_ACCOUNT_PRODUCT_CD = "55"
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,42 @@ def _get_pension_executions(cfg: KisConfig, access_token: str) -> list[TradeExec
         for item in data.get("output", [])
         if (e := _parse_execution(item, today)) is not None
     ]
+
+
+@dataclass(frozen=True)
+class PensionDeposit:
+    """퇴직연금 계좌 예수금 스냅샷 (거래내역이 아닌 '현재 잔액')."""
+
+    deposit_total: float  # 예수금총액
+    next_day_settlement: float  # 익일정산금액
+    next_2day_settlement: float  # 익2일정산금액
+
+
+def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
+    """퇴직연금 계좌의 현재 예수금을 조회한다. (입출금 이력이 아닌 스냅샷만 제공됨)"""
+    params = {
+        "CANO": cfg.account_no,
+        "ACNT_PRDT_CD": cfg.account_product_cd,
+        "ACCA_DVSN_CD": "00",
+    }
+    resp = requests.get(
+        f"{cfg.base_url}{_PENSION_DEPOSIT_PATH}",
+        headers=_headers(cfg, access_token, "TTTC0506R"),
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"퇴직연금 예수금 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
+
+    o = data.get("output", {})
+    return PensionDeposit(
+        deposit_total=float(o.get("dnca_tota", 0) or 0),
+        next_day_settlement=float(o.get("nxdy_sttl_amt", 0) or 0),
+        next_2day_settlement=float(o.get("nx2_day_sttl_amt", 0) or 0),
+    )
 
 
 def get_recent_executions(
@@ -178,12 +220,24 @@ def diversification_score(holdings: list[StockHolding]) -> tuple[float, float]:
     return hhi, top_weight_pct
 
 
-def investment_style_signal(activity: TradingActivitySummary, hhi: float) -> str:
+def is_pension_account(cfg: KisConfig) -> bool:
+    """퇴직연금 DC형 계좌인지 여부 (체결내역 API가 지원되지 않는 계좌 유형)."""
+    return cfg.account_product_cd == PENSION_DC_ACCOUNT_PRODUCT_CD
+
+
+def investment_style_signal(
+    activity: TradingActivitySummary, hhi: float, *, data_reliable: bool = True
+) -> str:
     """'분산 + 장기 + 저빈도' 원칙에 비추어 현재 계좌 운용 스타일을 간단히 진단한다."""
     low_frequency = activity.trades_per_month <= 4
     diversified = hhi <= 0.35  # 대략 3종목 이상 고르게 분산된 수준
 
     if activity.trade_count == 0:
+        if not data_reliable:
+            return (
+                "⚠️ 매매 0건으로 보이지만, 이 계좌 유형은 KIS Open API가 체결내역을 "
+                "제공하지 않아 실제 매매 여부를 판단할 수 없습니다 (데이터 아님, API 한계)"
+            )
         return "최근 매매 없음 — 보유 종목 유지 중 (장기 보유 성향)"
     if low_frequency and diversified:
         return "✅ 저빈도 + 분산 — 연구에서 상대적으로 좋은 성과를 보인 패턴에 부합"
