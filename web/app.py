@@ -44,6 +44,18 @@ from hantoo_rest_api.market import (
     get_net_flow_ranking,
     get_overseas_index_snapshots,
 )
+from hantoo_rest_api.portfolio_rebalance import (
+    CONTRIBUTION_PER_ROUND,
+    EXISTING_CASH_PARK,
+    TARGET_ASSETS,
+    PurchaseRecord,
+    append_purchase,
+    build_positions,
+    compute_rebalance_plan,
+    load_fund_nav,
+    load_purchases,
+    save_fund_nav,
+)
 from hantoo_rest_api.price import get_daily_candles
 from hantoo_rest_api.watchlist import load_watchlist
 
@@ -597,6 +609,137 @@ def render_candles(cfg: KisConfig, codes: list[tuple[str, str]]):
     st.plotly_chart(fig, width="stretch")
 
 
+def render_portfolio_rebalance(cfg: KisConfig):
+    """"🎯 목표 포트폴리오 리밸런싱" 섹션.
+
+    회차당 `CONTRIBUTION_PER_ROUND`(11,000,000원)를 목표 비중(TDF2050 20% /
+    TDF2035 20% / 나스닥100 20% / S&P500 40% / 금현물 10%)에 맞춰 배분한다.
+    ETF 3종은 KIS 시세를 그대로 쓰고, TDF 펀드 2종은 KIS API가 펀드 시세를
+    지원하지 않아 사용자가 직접 입력한 기준가(`fund_nav.csv`)를 쓴다. 이
+    섹션은 계좌 탭과 무관한 개인 목표 포트폴리오 계획이라 특정 계좌에 종속되지
+    않고(`cfg`는 시세 조회용 토큰만 빌려 씀) 페이지에 한 번만 렌더링된다.
+    """
+    st.subheader("🎯 목표 포트폴리오 리밸런싱")
+    st.caption(
+        f"회차당 {CONTRIBUTION_PER_ROUND:,.0f}원 투자, 목표 비중: "
+        + " · ".join(f"{a.name} {a.weight_pct:.0f}%" for a in TARGET_ASSETS)
+        + ". 이미 산 만큼을 반영해 다음 회차 매수 금액을 계산합니다."
+    )
+
+    live_prices: dict[str, float] = {}
+    for asset in TARGET_ASSETS + [EXISTING_CASH_PARK]:
+        if not asset.code:
+            continue
+        try:
+            candles = _candles(cfg, asset.code, 5)
+            if candles:
+                live_prices[asset.key] = candles[-1].close
+        except Exception as e:
+            st.warning(f"{asset.name} 시세 조회 실패: {e}")
+
+    fund_nav = load_fund_nav()
+    with st.expander("📌 펀드 기준가(NAV) 직접 입력 — KIS API가 펀드 시세를 지원하지 않음"):
+        st.caption("한투 앱이나 펀드 사이트에서 확인한 오늘 기준가를 입력하세요.")
+        for asset in TARGET_ASSETS:
+            if asset.asset_type != "fund":
+                continue
+            existing_nav, existing_date = fund_nav.get(asset.key, (0.0, dt.date.today()))
+            nc1, nc2, nc3 = st.columns([2, 1, 1])
+            nc1.write(f"**{asset.name}**  \n마지막 입력: {existing_date} = {existing_nav:,.2f}")
+            new_nav = nc2.number_input(
+                "기준가", min_value=0.0, value=float(existing_nav), key=f"nav_input_{asset.key}"
+            )
+            if nc3.button("저장", key=f"nav_save_{asset.key}"):
+                save_fund_nav(asset.key, new_nav, dt.date.today())
+                st.rerun()
+
+    current_prices = dict(live_prices)
+    for key, (nav, _as_of) in fund_nav.items():
+        current_prices[key] = nav
+
+    purchases = load_purchases()
+    positions = build_positions(purchases, current_prices)
+
+    with st.form("portfolio_purchase_form"):
+        st.markdown("**📝 매수 기록 입력**")
+        all_assets = TARGET_ASSETS + [EXISTING_CASH_PARK]
+        asset_options = {a.name: a.key for a in all_assets}
+        selected_name = st.selectbox("종목/펀드", list(asset_options.keys()))
+        p_date = st.date_input("매수일", value=dt.date.today())
+        p_qty = st.number_input("수량/좌수 (펀드는 몰라도 0으로 두고 금액만 기록 가능)", min_value=0.0, value=0.0, step=1.0)
+        p_price = st.number_input("매수 단가(원, 펀드는 기준가)", min_value=0.0, value=0.0, step=1.0)
+        p_amount = st.number_input("매수 금액(원)", min_value=0.0, value=0.0, step=10000.0)
+        p_note = st.text_input("메모", value="")
+        submitted = st.form_submit_button("기록 저장")
+        if submitted:
+            if p_amount <= 0:
+                st.error("매수 금액을 입력하세요.")
+            else:
+                append_purchase(
+                    PurchaseRecord(
+                        date=p_date,
+                        asset_key=asset_options[selected_name],
+                        quantity=p_qty,
+                        price=p_price,
+                        amount=p_amount,
+                        note=p_note,
+                    )
+                )
+                st.success("저장했습니다.")
+                st.rerun()
+
+    st.markdown("**📊 매입 대비 현재 수익률**")
+    total_invested = sum(p.invested_amount for p in positions)
+    total_current = sum(p.current_value or 0 for p in positions)
+    rows = [
+        {
+            "자산": p.asset.name,
+            "보유수량": p.quantity or None,
+            "매입총액": p.invested_amount,
+            "현재가/기준가": p.current_price,
+            "평가금액": p.current_value,
+            "손익": p.profit_loss,
+            "수익률(%)": p.profit_loss_rate,
+        }
+        for p in positions
+    ]
+    rows.append(
+        {
+            "자산": "합계",
+            "보유수량": None,
+            "매입총액": total_invested,
+            "현재가/기준가": None,
+            "평가금액": total_current,
+            "손익": (total_current - total_invested) if total_invested else None,
+            "수익률(%)": ((total_current - total_invested) / total_invested * 100) if total_invested else None,
+        }
+    )
+    st.dataframe(rows, width="stretch", hide_index=True, key="portfolio_return_table")
+
+    st.markdown(f"**🛒 다음 회차 매수 계획 (총 {CONTRIBUTION_PER_ROUND:,.0f}원)**")
+    plan = compute_rebalance_plan(positions)
+    plan_rows = [
+        {
+            "자산": item.asset.name,
+            "목표비중": f"{item.asset.weight_pct:.0f}%",
+            "현재평가금액": item.current_value,
+            "목표금액": item.target_value,
+            "매수필요금액": item.buy_amount,
+            "단가": item.price,
+            "매수수량": item.buy_quantity,
+            "실제매수금액": item.actual_cost,
+            "잔액": item.leftover,
+        }
+        for item in plan
+    ]
+    st.dataframe(plan_rows, width="stretch", hide_index=True, key="portfolio_plan_table")
+    st.caption(
+        "펀드는 정수 좌수 개념이 없어 '매수수량'이 비어 있습니다 — 계산된 '매수필요금액'만큼 "
+        "증권사 앱에서 '금액 매수'로 신청하면 됩니다. ACE KRX금현물은 실제 KRX 금현물시장(별도 "
+        "계좌 필요)의 대리 자산으로 쓴 상장 ETF입니다."
+    )
+
+
 def render_account_section(cfg: KisConfig):
     """계좌 하나에 대한 "보유 종목 + 투자 스타일 진단 + 수동 매매기록"을
     묶어서 렌더링하고, 캔들차트 종목 선택지 구성에 쓸 `AccountBalance`를
@@ -660,6 +803,8 @@ def main():
     for w in watchlist:
         code_to_name.setdefault(w.code, w.name or w.code)
     render_candles(primary_cfg, list(code_to_name.items()))
+
+    render_portfolio_rebalance(primary_cfg)
 
     with st.expander("ℹ️ 관리 정보"):
         st.markdown(

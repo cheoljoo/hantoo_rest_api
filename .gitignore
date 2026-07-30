@@ -225,3 +225,7 @@ todo/output/
 
 # 수동 매매 기록 (실제 거래 수량/금액 등 민감한 개인 금융정보 - public 저장소에 커밋하지 않음)
 transactions.yaml
+
+# 목표 포트폴리오 분할매수 기록 및 펀드 기준가 (개인 금융정보 - public 저장소에 커밋하지 않음)
+portfolio_purchases.csv
+fund_nav.csv
