@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from dataclasses import dataclass
 from typing import Literal
 
@@ -59,19 +60,31 @@ def get_daily_candles(
         "FID_ORG_ADJ_PRC": "0" if adjusted_price else "1",
     }
 
-    resp = requests.get(
-        f"{cfg.base_url}{_INQUIRE_DAILY_CHARTPRICE_PATH}",
-        headers=headers,
-        params=params,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    last_error: Exception | None = None
+    data: dict | None = None
+    for attempt in range(3):
+        if attempt > 0:
+            time.sleep(0.5 * attempt)
+        try:
+            resp = requests.get(
+                f"{cfg.base_url}{_INQUIRE_DAILY_CHARTPRICE_PATH}",
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            continue
+        if data.get("rt_cd") != "0":
+            last_error = RuntimeError(f"{data.get('msg_cd')} {data.get('msg1')}")
+            data = None
+            continue
+        break
 
-    if data.get("rt_cd") != "0":
-        raise RuntimeError(
-            f"{stock_code} 캔들 조회 실패: {data.get('msg_cd')} {data.get('msg1')}"
-        )
+    if data is None:
+        raise RuntimeError(f"{stock_code} 캔들 조회 실패 (재시도 3회 실패): {last_error}")
 
     candles = [
         Candle(

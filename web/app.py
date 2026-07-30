@@ -326,7 +326,11 @@ def render_candles(codes: list[tuple[str, str]]):
     selected = st.selectbox("종목 선택", labels)
     code, name = codes[labels.index(selected)]
 
-    candles = _candles(code, days)
+    try:
+        candles = _candles(code, days)
+    except Exception as e:
+        st.warning(f"{name}({code}) 캔들 조회 실패 (KIS 서버 일시 오류일 수 있습니다): {e}")
+        return
     if not candles:
         st.warning(f"{name}({code}) 캔들 데이터가 없습니다.")
         return
