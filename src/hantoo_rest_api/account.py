@@ -28,9 +28,19 @@ class StockHolding:
 
 @dataclass(frozen=True)
 class AccountSummary:
-    """계좌 전체 요약 정보."""
+    """계좌 전체 요약 정보.
 
-    deposit_total: float  # 예수금총금액 (dnca_tot_amt)
+    예수금은 국내 주식 결제가 T+2(매매일+2영업일)로 이뤄지는 것을 반영해
+    D(당일)/D+1(익일)/D+2(익익일, 최종 인출가능금액) 3단계로 나온다. 일반
+    위탁계좌·퇴직연금(DC형) 계좌 모두 `inquire-balance` 응답에 동일한 필드
+    구조로 이 3단계와 CMA평가금액(현금성 자산)을 포함하는 것을 실측으로
+    확인했다 — 계좌 유형과 무관하게 항상 채워진다.
+    """
+
+    deposit_total: float  # 예수금총금액, D (dnca_tot_amt)
+    next_day_withdrawable: float  # 익일 인출가능금액, D+1 (nxdy_excc_amt)
+    next_2day_withdrawable: float  # 가수도정산금액(최종 인출가능금액), D+2 (prvs_rcdl_excc_amt)
+    cma_eval_amount: float  # CMA평가금액 — 현금성 자산 (cma_evlu_amt)
     securities_eval_amount: float  # 유가증권평가금액 (scts_evlu_amt)
     total_eval_amount: float  # 총평가금액 (tot_evlu_amt)
     total_purchase_amount: float  # 매입금액합계금액 (pchs_amt_smtl_amt)
@@ -121,6 +131,9 @@ def get_account_balance(cfg: KisConfig, access_token: str) -> AccountBalance:
     summary_item = summary_items[0] if summary_items else {}
     summary = AccountSummary(
         deposit_total=float(summary_item.get("dnca_tot_amt", 0)),
+        next_day_withdrawable=float(summary_item.get("nxdy_excc_amt", 0)),
+        next_2day_withdrawable=float(summary_item.get("prvs_rcdl_excc_amt", 0)),
+        cma_eval_amount=float(summary_item.get("cma_evlu_amt", 0)),
         securities_eval_amount=float(summary_item.get("scts_evlu_amt", 0)),
         total_eval_amount=float(summary_item.get("tot_evlu_amt", 0)),
         total_purchase_amount=float(summary_item.get("pchs_amt_smtl_amt", 0)),

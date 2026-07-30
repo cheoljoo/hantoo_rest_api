@@ -19,7 +19,6 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.account_activity import (
     diversification_score,
-    get_pension_deposit,
     get_recent_executions,
     investment_style_signal,
     is_pension_account,
@@ -175,13 +174,6 @@ def _recent_executions(cfg: KisConfig, days: int):
     """`get_recent_executions` 캐시. 체결내역은 자주 바뀌지 않아 30분으로 길게 캐시."""
     token = _access_token(cfg)
     return get_recent_executions(cfg, token, days=days)
-
-
-@st.cache_data(ttl=60)
-def _pension_deposit(cfg: KisConfig):
-    """`get_pension_deposit` 캐시. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
-    token = _access_token(cfg)
-    return get_pension_deposit(cfg, token)
 
 
 @st.cache_data(ttl=60 * 30)
@@ -358,13 +350,24 @@ def render_holdings(cfg: KisConfig):
             ],
             width="stretch",
             hide_index=True,
+            key=f"holdings_table_{cfg.account_no}",
         )
 
     s = balance.summary
     col1, col2, col3 = st.columns(3)
-    col1.metric("예수금총액", f"{s.deposit_total:,.0f}")
-    col2.metric("총평가금액", f"{s.total_eval_amount:,.0f}")
-    col3.metric("평가손익합계", f"{s.total_eval_profit_loss:,.0f}")
+    col1.metric("총평가금액", f"{s.total_eval_amount:,.0f}")
+    col2.metric("평가손익합계", f"{s.total_eval_profit_loss:,.0f}")
+    col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
+
+    st.markdown("**💰 예수금 (D / D+1 / D+2)**")
+    st.caption(
+        "국내 주식 결제가 T+2(매매일+2영업일)로 이뤄지는 것을 반영한 3단계 예수금입니다. "
+        "일반 계좌·퇴직연금 계좌 모두 동일하게 제공됩니다."
+    )
+    d_col1, d_col2, d_col3 = st.columns(3)
+    d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
+    d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
+    d_col3.metric("D+2 (최종 인출가능)", f"{s.next_2day_withdrawable:,.0f}")
 
     return balance
 
@@ -405,27 +408,11 @@ def render_investment_style(cfg: KisConfig, balance):
             "이 계좌 유형의 API 한계이며, 보유 종목·평가금액은 정상적으로 반영됩니다."
         )
 
-    st.markdown("**💰 예수금 현황** (거래내역이 아닌 현재 잔액 스냅샷)")
-    if pension:
-        try:
-            deposit = _pension_deposit(cfg)
-        except Exception as e:
-            st.warning(f"퇴직연금 예수금 조회 실패: {e}")
-        else:
-            d_col1, d_col2, d_col3 = st.columns(3)
-            d_col1.metric("예수금총액", f"{deposit.deposit_total:,.0f}")
-            d_col2.metric("익일정산금액", f"{deposit.next_day_settlement:,.0f}")
-            d_col3.metric("익2일정산금액", f"{deposit.next_2day_settlement:,.0f}")
-            st.caption(
-                "퇴직연금 계좌는 KIS Open API가 입출금 이력(언제 얼마가 들어오고 나갔는지)은 "
-                "제공하지 않고, 이 현재 잔액 스냅샷만 제공합니다. 상세 입출금 내역은 HTS/MTS 앱의 "
-                "계좌 조회 화면에서 확인해야 합니다."
-            )
-    else:
-        st.caption(
-            "일반 계좌의 예수금총액/총평가금액은 위 '보유 종목' 섹션의 계좌 요약 지표를 참고하세요. "
-            "다만 이 저장소 기준으로는 예수금의 입출금 이력(거래일자별 상세 내역) 조회 API를 확인하지 못했습니다."
-        )
+    st.caption(
+        "예수금(D/D+1/D+2)과 현금성 자산(CMA)은 위 '보유 종목' 섹션에 계좌 유형과 무관하게 "
+        "표시됩니다 — 이 값은 현재 잔액 스냅샷이며, 언제 얼마가 입출금됐는지의 이력(원장)은 "
+        "어떤 계좌 유형이든 KIS Open API로 조회할 수 없어 HTS/MTS 앱에서 확인해야 합니다."
+    )
 
 
 TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
@@ -472,7 +459,7 @@ def render_manual_transactions(cfg: KisConfig):
         yaxis_title="거래대금",
         height=350,
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", key=f"manual_tx_chart_{cfg.account_no}")
 
     st.markdown("**종목별 매매 비교**")
     st.dataframe(
@@ -489,6 +476,7 @@ def render_manual_transactions(cfg: KisConfig):
         ],
         width="stretch",
         hide_index=True,
+        key=f"manual_tx_summary_{cfg.account_no}",
     )
 
     with st.expander("전체 매매 기록 원장"):
@@ -508,6 +496,7 @@ def render_manual_transactions(cfg: KisConfig):
             ],
             width="stretch",
             hide_index=True,
+            key=f"manual_tx_ledger_{cfg.account_no}",
         )
 
 
