@@ -663,7 +663,7 @@ def render_portfolio_rebalance(cfg: KisConfig):
     with st.form("portfolio_purchase_form"):
         st.markdown("**📝 매수 기록 입력**")
         all_assets = TARGET_ASSETS + [EXISTING_CASH_PARK]
-        asset_options = {a.name: a.key for a in all_assets}
+        asset_options = {f"{a.name} ({a.code or '펀드'})": a.key for a in all_assets}
         selected_name = st.selectbox("종목/펀드", list(asset_options.keys()))
         p_date = st.date_input("매수일", value=dt.date.today())
         p_qty = st.number_input("수량/좌수 (펀드는 몰라도 0으로 두고 금액만 기록 가능)", min_value=0.0, value=0.0, step=1.0)
@@ -694,6 +694,7 @@ def render_portfolio_rebalance(cfg: KisConfig):
     rows = [
         {
             "자산": p.asset.name,
+            "티커": p.asset.code or "-",
             "보유수량": p.quantity or None,
             "매입총액": p.invested_amount,
             "현재가/기준가": p.current_price,
@@ -706,6 +707,7 @@ def render_portfolio_rebalance(cfg: KisConfig):
     rows.append(
         {
             "자산": "합계",
+            "티커": "",
             "보유수량": None,
             "매입총액": total_invested,
             "현재가/기준가": None,
@@ -721,6 +723,7 @@ def render_portfolio_rebalance(cfg: KisConfig):
     plan_rows = [
         {
             "자산": item.asset.name,
+            "티커": item.asset.code or "-",
             "목표비중": f"{item.asset.weight_pct:.0f}%",
             "현재평가금액": item.current_value,
             "목표금액": item.target_value,
