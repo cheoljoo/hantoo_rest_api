@@ -38,11 +38,25 @@ def get_daily_candles(
     period_div: PeriodDiv = "D",
     adjusted_price: bool = True,
 ) -> list[Candle]:
-    """종목 하나의 기간별 캔들(OHLCV) 데이터를 오래된 순으로 반환한다.
+    """`/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice`(tr_id
+    FHKST03010100)로 종목 하나의 기간별 캔들(OHLCV)을 조회해 날짜 오름차순으로
+    반환한다. 응답의 `output2`가 캔들 배열이고, `stck_bsop_date`(영업일자)가
+    없는 행은 걸러낸다(장 운영일이 아닌 날 등 빈 데이터 방어).
 
-    stock_code: 6자리 종목코드 (예: "005930")
-    period_div: "D"(일봉) / "W"(주봉) / "M"(월봉) / "Y"(년봉)
-    adjusted_price: True면 수정주가(액면분할/배당 등 반영) 기준으로 조회
+    Args:
+        stock_code: 6자리 종목코드 (예: "005930"). ETF도 동일한 방식으로 조회된다.
+        start_date, end_date: 조회 기간 (양 끝 포함).
+        period_div: "D"(일봉) / "W"(주봉) / "M"(월봉) / "Y"(년봉).
+        adjusted_price: True면 수정주가(액면분할/배당 등 반영) 기준으로 조회.
+
+    KIS 서버가 간헐적으로 5xx(특히 500 Internal Server Error)나 "초당 거래건수
+    초과" 오류를 반환하는 것이 실제 운영 중 여러 번 관찰되어, 최대 3회까지
+    지수적으로 대기하며 재시도한다. 3회 모두 실패하면 마지막 오류 내용을 담아
+    `RuntimeError`를 던진다 — 호출자(웹 대시보드 등)는 이 예외를 잡아 해당
+    종목만 건너뛰고 나머지 화면은 정상 렌더링하도록 처리해야 한다.
+
+    Raises:
+        RuntimeError: 3회 재시도 후에도 요청이 실패한 경우.
     """
     headers = {
         "content-type": "application/json; charset=utf-8",
@@ -111,7 +125,12 @@ def get_candles_for_codes(
     end_date: dt.date,
     period_div: PeriodDiv = "D",
 ) -> dict[str, list[Candle]]:
-    """여러 종목코드에 대해 한 번에 캔들 데이터를 조회한다. (보유종목 + 관심종목 조합에 사용)"""
+    """여러 종목코드에 대해 `get_daily_candles`를 하나씩 호출해 코드→캔들 딕셔너리로 모은다.
+
+    보유종목 + 관심종목을 합친 코드 목록에 사용하도록 설계했다. 종목별로 순차 호출하므로
+    종목 수가 많아지면 그만큼 시간이 걸린다(현재는 배치/병렬 조회 API를 쓰지 않음) —
+    종목이 아주 많아지면 병렬화나 배치 API 검토가 필요할 수 있다.
+    """
     return {
         code: get_daily_candles(
             cfg,

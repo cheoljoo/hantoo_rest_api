@@ -1,4 +1,13 @@
-"""시장 전체 방향성(코스피/코스닥 지수, 등락 종목수, 외국인/기관 매매동향, 미국 3대 지수 쏠림) 조회."""
+"""시장 전체 방향성(코스피/코스닥 지수, 등락 종목수, 외국인/기관 매매동향, 미국 3대 지수 쏠림) 조회.
+
+이 모듈은 웹 대시보드의 "📈 시장 동향 (Macro)" 섹션의 데이터 소스다. 한 가지 중요한
+제약: `OVERSEAS_INDEX_CODES` 아래 주석대로, KIS의 해외지수 API는 다우30/나스닥100/
+S&P500 구성종목 외의 해외 지수(니케이/항셍/유럽/인도 등)를 조회하면 rt_cd는
+성공(0)이지만 필드가 전부 0인 빈 값을 반환한다 — 에러가 아니라 "조용한 실패"라서
+실측(여러 종목코드로 직접 호출)해보기 전까지는 API 문서만으로 알아채기 어려웠다.
+그래서 미국 외 국가 지수는 이 모듈이 아니라 `global_indices.py`(yfinance 기반)에서
+별도로 처리한다.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +40,7 @@ OVERSEAS_INDEX_CODES: dict[str, str] = {
 
 
 def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
+    """KIS REST API 공통 요청 헤더. `tr_id`(거래ID)만 API마다 다르게 넘겨준다."""
     return {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {access_token}",
@@ -44,7 +54,14 @@ def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
 def _get_with_retry(
     url: str, headers: dict[str, str], params: dict[str, str], *, retries: int = 2
 ) -> dict:
-    """KIS API가 간헐적으로 5xx/초당거래건수초과를 반환하는 경우를 위한 재시도 래퍼."""
+    """GET 요청 후 응답 JSON을 반환하되, 실패 시 최대 `retries`회 재시도한다.
+
+    "실패"의 범위는 두 가지다: (1) HTTP 예외/타임아웃 등 `requests.RequestException`,
+    JSON 파싱 실패, (2) HTTP 상태코드는 200이지만 KIS 응답 바디의 `rt_cd`가 "0"이
+    아닌 업무 오류(예: 초당 거래건수 초과). 실제 운영 중 이 두 유형 모두 KIS 서버
+    쪽에서 간헐적으로 발생하는 것을 확인했다. 매 재시도 사이 `0.5 * 시도횟수`초만큼
+    선형 백오프한다. 최종 실패 시 마지막 오류를 포함한 `RuntimeError`를 던진다.
+    """
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         if attempt > 0:
@@ -98,7 +115,12 @@ class IndexSnapshot:
 
 
 def get_index_snapshot(cfg: KisConfig, access_token: str, index_code: str) -> IndexSnapshot:
-    """지수 하나(코스피 0001 / 코스닥 1001 등)의 현재 스냅샷을 조회한다."""
+    """`/uapi/domestic-stock/v1/quotations/inquire-index-price`(tr_id FHPUP02100000)로
+    지수 하나(코스피 0001 / 코스닥 1001 등)의 현재가와 상승/하락/보합/상한/하한
+    종목수를 조회한다. `FID_COND_MRKT_DIV_CODE="U"`(업종)로 고정하고 `index_code`를
+    `FID_INPUT_ISCD`에 넘긴다. 등락 종목수는 `IndexSnapshot.breadth_signal`에서
+    시장 폭(breadth) 판단에, 등락률과 함께 `trend_signal`에서 종합 신호 산출에 쓰인다.
+    """
     params = {
         "FID_COND_MRKT_DIV_CODE": "U",
         "FID_INPUT_ISCD": index_code,
@@ -127,7 +149,7 @@ def get_index_snapshot(cfg: KisConfig, access_token: str, index_code: str) -> In
 def get_index_snapshots(
     cfg: KisConfig, access_token: str, index_codes: list[str] | None = None
 ) -> list[IndexSnapshot]:
-    """여러 지수(기본: 코스피/코스닥)의 스냅샷을 한 번에 조회한다."""
+    """`index_codes`(기본: 코스피/코스닥)를 순서대로 `get_index_snapshot`으로 조회한다."""
     codes = index_codes or list(INDEX_CODES)
     return [get_index_snapshot(cfg, access_token, code) for code in codes]
 
@@ -151,9 +173,20 @@ def get_net_flow_ranking(
     market_code: str = "0000",
     top_n: int = 10,
 ) -> list[NetFlowItem]:
-    """외국인+기관 합산 순매수 상위 종목 랭킹을 조회한다.
+    """`/uapi/domestic-stock/v1/quotations/foreign-institution-total`(tr_id
+    FHPTJ04400000, HTS [0440] 화면에 대응)으로 외국인+기관 합산 순매수 상위
+    종목 랭킹을 조회한다.
 
-    market_code: "0000" 전체, "0001" 코스피, "1001" 코스닥
+    이 API는 "증권사 직원이 장중에 집계/입력한 자료를 단순 누계한 수치"라서
+    실시간 정밀 데이터가 아니라 하루 중 몇 차례(외국인 09:30/11:20/13:20/14:30,
+    기관종합 10:00/11:20/13:20/14:30)만 갱신되며 ±10분 정도 오차가 날 수
+    있다(KIS 공식 안내) — 대시보드에도 이 사실을 캡션으로 명시해 사용자가
+    실시간 데이터로 오해하지 않도록 했다.
+
+    Args:
+        market_code: "0000" 전체, "0001" 코스피, "1001" 코스닥.
+        top_n: 반환할 상위 종목 수 (API 응답을 그대로 자르는 방식이라, API가
+            더 적은 수만 반환하면 top_n보다 적게 나올 수 있다).
     """
     params = {
         "FID_COND_MRKT_DIV_CODE": "V",
@@ -197,7 +230,15 @@ class OverseasIndexSnapshot:
 def get_overseas_index_snapshot(
     cfg: KisConfig, access_token: str, index_code: str
 ) -> OverseasIndexSnapshot:
-    """미국 주요 지수 하나의 현재 스냅샷을 조회한다."""
+    """`/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`(tr_id
+    FHKST03030100, `FID_COND_MRKT_DIV_CODE="N"` 해외지수)로 미국 주요 지수
+    하나의 현재 스냅샷을 조회한다. 이 엔드포인트는 일/주/월/년봉 기간별 시세
+    조회용이라 `start_date`/`end_date` 구간이 필요하지만, 여기서는 "가장 최근
+    거래일의 스냅샷"만 필요하므로 최근 10일 구간으로 요청해 `output1`(가장
+    최근 시점의 현재가/전일대비 요약)만 사용하고 `output2`(일별 상세 배열)는
+    버린다. `index_code`는 반드시 `OVERSEAS_INDEX_CODES`에 있는 코드여야
+    의미 있는 데이터가 나온다 (모듈 docstring 참고).
+    """
     end_date = dt.date.today()
     start_date = end_date - dt.timedelta(days=10)
     params = {

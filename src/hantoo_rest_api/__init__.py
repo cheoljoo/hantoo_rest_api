@@ -1,3 +1,11 @@
+"""`uv run hantoo-rest-api`로 실행되는 CLI 엔트리포인트.
+
+계좌 조회 → 관심종목 로딩 → 보유종목+관심종목 캔들 조회 순서로 각 모듈을
+한 번씩 호출해보는 간단한 스모크 테스트 스크립트에 가깝다. 실제 대시보드는
+`web/app.py`(Streamlit)에 있고, 이 CLI는 `.env` 설정이 올바른지, 토큰 발급과
+계좌 조회가 정상 동작하는지 빠르게 확인하는 용도로 쓴다.
+"""
+
 import datetime as dt
 
 from .account import get_account_balance
@@ -8,6 +16,7 @@ from .watchlist import load_watchlist
 
 
 def _print_holdings(balance) -> None:
+    """`AccountBalance`를 사람이 읽기 좋은 표 형태로 표준출력에 찍는다."""
     print("\n=== 보유 종목 ===")
     if not balance.holdings:
         print("보유 중인 종목이 없습니다.")
@@ -29,6 +38,12 @@ def _print_holdings(balance) -> None:
 
 
 def main() -> None:
+    """계좌 잔고, 관심종목, 최근 캔들을 순서대로 조회해 콘솔에 출력한다.
+
+    보유종목 + 관심종목 코드를 합쳐 최근 14일 일봉을 한 번씩 조회하는 것은,
+    `price.get_daily_candles`가 실제 KIS 서버에 대해 정상 동작하는지 확인하는
+    수동 스모크 테스트 목적이 크다 (자동화된 pytest는 아직 없음).
+    """
     cfg = load_config()
     access_token = get_access_token(cfg)
 

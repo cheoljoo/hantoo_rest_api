@@ -17,6 +17,13 @@ _EXPIRY_MARGIN_SECONDS = 60 * 10
 
 
 def _load_cached_token(base_url: str) -> str | None:
+    """`TOKEN_CACHE_PATH`에서 base_url(실전/모의)에 해당하는 토큰을 읽어온다.
+
+    캐시 파일이 없거나 JSON 파싱에 실패하거나(다른 프로세스가 쓰는 도중 등),
+    만료 시각이 `_EXPIRY_MARGIN_SECONDS` 이내로 임박했으면 None을 반환해
+    상위 호출자가 새로 발급받도록 한다. base_url별로 별도 키를 두는 이유는
+    실전투자/모의투자 서버의 토큰이 서로 호환되지 않기 때문이다.
+    """
     if not TOKEN_CACHE_PATH.exists():
         return None
     try:
@@ -33,6 +40,11 @@ def _load_cached_token(base_url: str) -> str | None:
 
 
 def _save_cached_token(base_url: str, access_token: str, expires_at: float) -> None:
+    """새로 발급받은 토큰을 base_url별로 캐시 파일에 병합 저장한다.
+
+    기존 캐시를 읽어서 병합하는 이유는, 실전/모의 두 서버의 토큰을 같은 파일에
+    함께 캐시하기 때문에 한쪽을 갱신할 때 다른 쪽 항목을 덮어쓰지 않기 위해서다.
+    """
     TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     cache = {}
     if TOKEN_CACHE_PATH.exists():
@@ -45,10 +57,18 @@ def _save_cached_token(base_url: str, access_token: str, expires_at: float) -> N
 
 
 def get_access_token(cfg: KisConfig) -> str:
-    """접근토큰을 발급받는다.
+    """OAuth2 client_credentials 방식으로 접근토큰(access token)을 발급받는다.
 
-    한투 API는 동일 앱키로 토큰을 너무 자주 재발급하면 오류가 나므로,
-    파일에 캐시해두고 만료 임박 전까지는 재사용한다.
+    한투 API는 동일 앱키로 토큰을 너무 자주(예: 분당 1회 이상) 재발급 요청하면
+    거부 응답을 반환하므로, `~/.cache/hantoo_rest_api/token.json`에 파일 캐시를
+    두고 만료 `_EXPIRY_MARGIN_SECONDS`(10분) 전까지는 캐시된 토큰을 재사용한다.
+    여러 프로세스(CLI + Streamlit 등)가 같은 캐시 파일을 공유해도 안전하도록
+    설계했지만, 동시에 캐시가 만료된 순간 여러 프로세스가 동시에 재발급을
+    시도하면 레이스 컨디션이 생길 수 있다(락 없음) — 지금까지는 문제된 적 없지만
+    다중 프로세스 환경에서 재발급 오류가 잦아지면 파일 락 도입을 고려할 것.
+
+    Returns:
+        Bearer 토큰으로 사용할 access_token 문자열.
     """
     cached = _load_cached_token(cfg.base_url)
     if cached:

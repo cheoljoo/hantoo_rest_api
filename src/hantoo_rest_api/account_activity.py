@@ -1,5 +1,31 @@
 """내 계좌의 매매빈도/분산도를 '장기·분산·저빈도 투자자가 수익률이 좋다'는
 실증 연구 원칙(자본시장연구원 개인투자자 성과 분석 등)에 비추어 정량화한다.
+
+## 계좌 유형별 KIS Open API 지원 범위 (실측 결과 정리)
+
+체결내역(거래내역) 조회는 계좌 유형에 따라 지원 범위가 다르다는 것을 실제 계좌로
+5개 이상의 엔드포인트를 테스트해서 확인했다:
+
+- **일반 위탁계좌**: `_DAILY_CCLD_PATH`(tr_id TTTC0081R/VTTC0081R, 최근 3개월 이내)로
+  체결내역이 정상 조회된다.
+- **퇴직연금 DC형 계좌(상품코드 "55")**: 위 API를 호출하면 `APBK1744`
+  ("퇴직연금계좌는 해당 서비스가 불가합니다") 오류가 나서, 퇴직연금 전용
+  `_PENSION_DAILY_CCLD_PATH`(tr_id TTTC2201R)로 자동 전환한다(`get_recent_executions`
+  참고). **그런데 이 전용 API조차 실제 매매(예: 173주→193주 등 수량 변동)가
+  있었음에도 항상 빈 배열만 반환한다** — `CCLD_NCCS_DVSN`을 "01"(체결)/"02"(미체결)/
+  "%%"(전체) 어느 값으로 바꿔도 결과는 같았고, 별도로 실현손익 조회
+  (`TTTC8494R`)와 체결기준잔고(`TTTC2202R`)까지 테스트해봤지만 전부 "현재 잔고
+  스냅샷"만 주거나 "조회할 내용이 없습니다"만 반환했다. 즉 **DC형 계좌는 KIS
+  Open API로 과거 매매 이력을 복원할 방법이 없는 것으로 결론 내렸다.**
+  (`docs/bear_market_signals_kim_hyojin.md`과 별개로, 이 결론 자체가 이 프로젝트의
+  중요한 트러블슈팅 기록이다.)
+- 이 한계 때문에 `investment_style_signal`은 `data_reliable=False`일 때 "매매
+  0건"을 "장기 보유"로 오해하지 않도록 별도 경고 문구를 반환하고, 실제 매매는
+  `manual_transactions.py`(사용자가 직접 기록하는 `transactions.yaml`)로 보완한다.
+- 예수금(현재 잔액) 조회(`get_pension_deposit`, tr_id TTTC0506R)는 DC형 계좌에서도
+  정상 동작한다 — 공식 문서에는 "55번 계좌는 이용 불가"라고 적혀 있었지만 실제로는
+  정상 응답이 왔다. **문서상 경고와 실제 동작이 다를 수 있으니, 계좌 유형별 API
+  가용 여부는 문서보다 실측으로 확인하는 것이 안전하다.**
 """
 
 from __future__ import annotations
@@ -26,7 +52,7 @@ PENSION_DC_ACCOUNT_PRODUCT_CD = "55"
 
 @dataclass(frozen=True)
 class TradeExecution:
-    """체결 1건."""
+    """체결 1건. 일반/퇴직연금 체결내역 API 응답을 공통 형태로 정규화한 것."""
 
     date: dt.date
     stock_code: str
@@ -37,6 +63,7 @@ class TradeExecution:
 
 
 def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
+    """KIS REST API 공통 요청 헤더. `tr_id`(거래ID)만 API마다 다르게 넘겨준다."""
     return {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {access_token}",
@@ -50,7 +77,13 @@ def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
 def _get_with_retry(
     url: str, headers: dict[str, str], params: dict[str, str], *, retries: int = 2
 ) -> dict:
-    """KIS API가 간헐적으로 5xx를 반환하는 경우를 위한 재시도 래퍼."""
+    """GET 요청 후 JSON을 반환하되, HTTP 예외/타임아웃을 최대 `retries`회
+    재시도한다(선형 백오프: `0.5 * 시도횟수`초). `rt_cd` 업무 오류는 여기서
+    재시도하지 않고 그대로 반환한다 — 호출자가 `msg_cd`를 보고
+    (예: `_PENSION_ACCOUNT_ERROR_CODE`) 계좌 유형별 분기 처리를 해야 하기
+    때문에, 이 함수가 그 정보를 먹어버리면 안 된다 (`market.py`의 동명 함수는
+    범용 조회용이라 업무 오류도 재시도하는 것과의 차이점).
+    """
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         if attempt > 0:
@@ -65,6 +98,12 @@ def _get_with_retry(
 
 
 def _parse_execution(item: dict, default_date: dt.date) -> TradeExecution | None:
+    """체결내역 API 응답의 원소 하나를 `TradeExecution`으로 변환한다.
+
+    `tot_ccld_qty`(총체결수량)가 0인 행(미체결 주문 등)은 실제 체결이 아니므로
+    None을 반환해 걸러낸다. `ord_dt`(주문일자) 필드가 없는 응답(일부 퇴직연금
+    API 응답 형태)에 대비해 `default_date`로 대체한다.
+    """
     qty = int(item.get("tot_ccld_qty", 0) or 0)
     if qty <= 0:
         return None
@@ -80,7 +119,15 @@ def _parse_execution(item: dict, default_date: dt.date) -> TradeExecution | None
 
 
 def _get_pension_executions(cfg: KisConfig, access_token: str) -> list[TradeExecution]:
-    """퇴직연금(IRP/DC) 계좌 전용 체결 내역 조회 (일반 계좌용 API는 이 계좌 유형을 지원하지 않음)."""
+    """퇴직연금(DC형) 계좌 전용 체결 내역 조회.
+
+    실측 결과 이 API는 `rt_cd="0"`(성공)을 반환하지만 `output`이 항상 빈
+    배열이었다 — 즉 호출은 성공하는데 실제 데이터가 없다. 이 함수 자체는
+    "정상적으로 빈 목록을 반환"하는 것으로 동작하므로, 이 결과를 "실제 매매
+    없음"으로 오인하지 않도록 호출자(`investment_style_signal`)에서
+    `data_reliable=False`로 명시적으로 표시해야 한다. 모듈 docstring의 계좌
+    유형별 정리 참고.
+    """
     params = {
         "CANO": cfg.account_no,
         "ACNT_PRDT_CD": cfg.account_product_cd,
@@ -118,7 +165,16 @@ class PensionDeposit:
 
 
 def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
-    """퇴직연금 계좌의 현재 예수금을 조회한다. (입출금 이력이 아닌 스냅샷만 제공됨)"""
+    """`/uapi/domestic-stock/v1/trading/pension/inquire-deposit`(tr_id
+    TTTC0506R)로 퇴직연금 계좌의 현재 예수금 스냅샷을 조회한다.
+
+    KIS 공식 문서에는 이 API가 "55번 계좌(DC가입자계좌)는 이용 불가"라고
+    적혀 있지만, 실제 이 계좌(상품코드 55)로 호출해보면 정상적으로 값을
+    반환한다 — 문서와 실제 동작이 어긋나는 사례이니, 이 API가 향후 정말
+    막히거나 응답 필드가 바뀌더라도 "원래 안 되는 API였다"고 오판하지 말고
+    실제 응답을 다시 확인할 것. 언제 얼마가 입금/출금됐는지의 이력은
+    제공하지 않고, 조회 시점의 잔액만 준다.
+    """
     params = {
         "CANO": cfg.account_no,
         "ACNT_PRDT_CD": cfg.account_product_cd,
@@ -144,7 +200,21 @@ def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
 def get_recent_executions(
     cfg: KisConfig, access_token: str, *, days: int = 90
 ) -> list[TradeExecution]:
-    """최근 N일(최대 3개월 이내) 체결 내역을 조회한다. 퇴직연금 계좌는 전용 API로 자동 전환."""
+    """`/uapi/domestic-stock/v1/trading/inquire-daily-ccld`(tr_id TTTC0081R
+    실전 / VTTC0081R 모의)로 최근 N일(최대 90일 = 3개월 이내) 체결 내역을
+    조회한다. `CCLD_DVSN="01"`(체결만)로 미체결/취소 주문은 제외한다.
+
+    응답이 `rt_cd != "0"`이면서 `msg_cd`가 `_PENSION_ACCOUNT_ERROR_CODE`
+    ("퇴직연금계좌는 해당 서비스가 불가합니다")이면, 이 계좌가 퇴직연금
+    계좌라는 뜻이므로 `_get_pension_executions`로 자동 전환한다 — 호출자는
+    계좌 유형을 미리 알 필요 없이 이 함수 하나만 부르면 된다. 다만 모듈
+    docstring에서 설명한 대로 퇴직연금 계좌는 결국 빈 목록이 반환되니,
+    호출자가 `is_pension_account(cfg)`로 이 사실을 사용자에게 알려주는 것이
+    좋다.
+
+    Raises:
+        RuntimeError: 퇴직연금 계좌 오류가 아닌 다른 사유로 조회에 실패한 경우.
+    """
     tr_id = "VTTC0081R" if cfg.is_virtual else "TTTC0081R"
     end_date = dt.date.today()
     start_date = end_date - dt.timedelta(days=min(days, 90))
@@ -188,7 +258,7 @@ def get_recent_executions(
 
 @dataclass(frozen=True)
 class TradingActivitySummary:
-    """기간 내 매매 활동 요약."""
+    """기간 내 매매 활동 요약. `investment_style_signal`의 입력으로 쓰인다."""
 
     period_days: int
     trade_count: int
@@ -201,6 +271,13 @@ class TradingActivitySummary:
 def summarize_trading_activity(
     executions: list[TradeExecution], period_days: int
 ) -> TradingActivitySummary:
+    """체결 목록을 기간(`period_days`) 기준 통계로 집계한다.
+
+    `trades_per_month`는 "월 4회 이하면 저빈도"라는 `investment_style_signal`의
+    판단 기준에 쓰이는 정규화된 지표로, `period_days`가 90이 아니어도(예:
+    30일만 조회) 월 단위로 비교 가능하도록 `len(executions) / (period_days/30)`
+    으로 계산한다.
+    """
     buy_count = sum(1 for e in executions if e.side == "매수")
     sell_count = sum(1 for e in executions if e.side == "매도")
     months = max(period_days / 30.0, 1e-9)
@@ -215,7 +292,12 @@ def summarize_trading_activity(
 
 
 def diversification_score(holdings: list[StockHolding]) -> tuple[float, float]:
-    """보유 종목의 집중도를 계산한다.
+    """평가금액 비중으로 허핀달-허쉬만지수(HHI)와 최대 비중 종목의 비중을 계산한다.
+
+    HHI = Σ(비중²)이며 1종목에 100% 집중이면 1.0, N종목에 균등 분산이면
+    1/N로 낮아진다. `investment_style_signal`에서는 HHI ≤ 0.35(대략 3종목
+    이상 고르게 분산된 수준)를 "분산됨"의 임계값으로 쓴다. 보유 종목이 없거나
+    평가금액 합계가 0 이하이면 (0.0, 0.0)을 반환한다.
 
     Returns:
         (허핀달-허쉬만지수 0~1(1이면 한 종목에 100% 집중), 최대 비중 종목의 비중(%))
@@ -230,14 +312,33 @@ def diversification_score(holdings: list[StockHolding]) -> tuple[float, float]:
 
 
 def is_pension_account(cfg: KisConfig) -> bool:
-    """퇴직연금 DC형 계좌인지 여부 (체결내역 API가 지원되지 않는 계좌 유형)."""
+    """계좌상품코드로 퇴직연금 DC형 계좌인지 판별한다 (체결내역 API 미지원 계좌 유형).
+
+    이 판별은 상품코드 문자열 비교만으로 이뤄지는 휴리스틱이다 — KIS가 공식
+    문서로 상품코드 체계를 공개하지 않아, 실제 계좌(상품코드 "55")로 여러
+    API를 테스트해서 얻은 경험적 결론을 코드화한 것이다. 다른 특수 계좌
+    유형(개인형 IRP 등)이 다른 코드를 쓴다면 이 함수로 걸러지지 않을 수 있다.
+    """
     return cfg.account_product_cd == PENSION_DC_ACCOUNT_PRODUCT_CD
 
 
 def investment_style_signal(
     activity: TradingActivitySummary, hhi: float, *, data_reliable: bool = True
 ) -> str:
-    """'분산 + 장기 + 저빈도' 원칙에 비추어 현재 계좌 운용 스타일을 간단히 진단한다."""
+    """'분산 + 장기 + 저빈도' 원칙에 비추어 현재 계좌 운용 스타일을 간단히 진단한다.
+
+    분류 기준: 월평균 매매 4회 이하를 저빈도, HHI 0.35 이하를 분산으로 본다
+    (둘 다 정교한 통계적 최적값이 아니라 실용적인 경험적 임계값).
+
+    Args:
+        activity: `summarize_trading_activity`의 결과.
+        hhi: `diversification_score`가 계산한 허핀달-허쉬만지수.
+        data_reliable: False면 `activity.trade_count == 0`을 "매매 없음"이
+            아니라 "이 계좌 유형은 체결내역 API를 지원하지 않아 판단 불가"로
+            해석해 다른 문구를 반환한다 (`account_activity` 모듈 docstring의
+            퇴직연금 계좌 한계 참고). 호출자는 `is_pension_account(cfg)`의
+            반전값을 넘기면 된다.
+    """
     low_frequency = activity.trades_per_month <= 4
     diversified = hhi <= 0.35  # 대략 3종목 이상 고르게 분산된 수준
 

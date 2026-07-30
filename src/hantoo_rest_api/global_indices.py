@@ -26,18 +26,27 @@ GLOBAL_INDEX_TICKERS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class GlobalIndexSnapshot:
-    """주변국 지수 하나의 스냅샷."""
+    """주변국 지수 하나의 스냅샷 (yfinance 기준)."""
 
-    ticker: str
-    name: str
-    current: float
-    change_rate: float  # 전일 대비율(%)
+    ticker: str  # yfinance 티커 (예: "^N225")
+    name: str  # 표시용 이름 (예: "니케이225(일본)")
+    current: float  # 최근 종가
+    change_rate: float  # 전일 대비율(%). 직전 종가 대비 계산 (장중 실시간 등락률이 아님)
 
 
 def get_global_index_snapshots(
     tickers: dict[str, str] | None = None,
 ) -> list[GlobalIndexSnapshot]:
-    """주변국 지수들의 최신 등락률을 한 번에 조회한다."""
+    """`yf.download`로 여러 티커의 최근 5거래일 종가를 한 번에 받아와, 각 티커의
+    "최근 종가 vs 직전 종가" 등락률을 계산한다.
+
+    5일치를 받는 이유는 공휴일 등으로 최근 1~2일 데이터가 비어있을 수 있어
+    최소 2개의 유효한 종가를 확보하기 위한 여유분이다. `threads=True`로 티커별
+    요청을 병렬화해 8개국을 순차 조회할 때보다 응답을 앞당긴다. 특정 티커의
+    데이터가 없거나(`KeyError`) 유효 종가가 2개 미만이면 그 티커는 결과에서
+    조용히 제외한다(전체 조회 실패로 처리하지 않음) — 일부 국가장이 휴장이어도
+    나머지 국가는 정상 표시되도록 하기 위함이다.
+    """
     ticker_map = tickers or GLOBAL_INDEX_TICKERS
     data = yf.download(
         list(ticker_map),
@@ -64,13 +73,20 @@ def get_global_index_snapshots(
 
 
 def peripheral_negative_count(snapshots: list[GlobalIndexSnapshot]) -> tuple[int, int]:
-    """마이너스로 전환한 주변국 수와 전체 조회된 국가 수를 반환한다."""
+    """(마이너스로 전환한 국가 수, 조회에 성공한 전체 국가 수)를 반환한다."""
     negative = sum(1 for s in snapshots if s.change_rate < 0)
     return negative, len(snapshots)
 
 
 def peripheral_signal(snapshots: list[GlobalIndexSnapshot]) -> str:
-    """주변국 증시 다수가 마이너스로 돌아섰는지로 '글로벌 연끌' 완성 단계를 가늠한다."""
+    """주변국 증시 중 몇 %가 마이너스로 전환했는지로 '글로벌 연끌(쏠림)' 완성 단계를 가늠한다.
+
+    김효진 박사가 설명한 논리: 버블 막판에는 대장주(나스닥 등)만 오르고 주변부
+    자산(다른 우량주, 주변국 증시)에서 자금이 빠져나간다 — 즉 주변국이 얼마나
+    동반 하락하는지가 '연끌이 얼마나 진행됐는지'의 대리 지표가 된다. 임계값
+    70%/40%는 정교한 통계적 근거가 아니라 "대다수/일부"를 구분하기 위한 실용적
+    기준값이며, 실제 사용 데이터가 쌓이면 조정이 필요할 수 있다.
+    """
     negative, total = peripheral_negative_count(snapshots)
     if total == 0:
         return "판단 불가 (데이터 부족)"

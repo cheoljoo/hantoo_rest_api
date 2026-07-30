@@ -1,3 +1,14 @@
+"""KIS 계좌/시장 데이터를 보여주는 Streamlit 웹 대시보드.
+
+`hantoo_rest_api` 라이브러리(루트의 `src/`)를 워크스페이스 의존성으로 사용해
+계좌 조회, 시장 지표, 매매 스타일 진단, 캔들차트를 한 화면에 모아 보여준다.
+systemd(`hantooweb.service`) + nginx 리버스 프록시로 `psncs.iptime.org/hantoo/`에
+배포되어 있다. 캐시(`@st.cache_data`/`@st.cache_resource`)로 KIS API 호출
+빈도를 낮추고, 각 섹션을 개별 `try/except`로 감싸 한 API가 실패해도 나머지
+섹션은 정상 렌더링되도록 설계했다(예: 지수 API가 500 에러를 내도 보유종목
+섹션은 계속 보인다).
+"""
+
 import sys
 import tomllib
 from pathlib import Path
@@ -62,6 +73,10 @@ PASSWORD = load_password()
 
 
 def check_password() -> bool:
+    """비밀번호 게이트. 인증 성공 시 `st.session_state["authed"]`를 세워 다음
+    렌더부터는 폼을 건너뛴다. 인증 전에는 항상 False를 반환해 `main()`이
+    나머지 화면을 그리지 않고 조기 종료하도록 한다.
+    """
     if st.session_state.get("authed"):
         return True
     st.title("hantoo 접근")
@@ -77,20 +92,37 @@ def check_password() -> bool:
     return False
 
 
+# 아래 `_*` 함수들은 KIS/외부 API 호출을 감싼 캐시 레이어다. `@st.cache_resource`는
+# 세션 간에 값 자체(토큰 문자열)를 공유해도 안전한 리소스에, `@st.cache_data`는
+# 매번 새로 복사해도 되는 순수 데이터에 사용한다 — Streamlit 캐싱 규칙을 그대로 따름.
+# TTL은 API 성격에 맞춰 다르게 뒀다: 토큰(6시간, 실제 만료는 auth.py가 별도 관리),
+# 실시간성이 중요한 계좌잔고/예수금(60초), 나머지 시세성 데이터(5~30분).
+
+
 @st.cache_resource(ttl=60 * 60 * 6)
 def _access_token():
+    """`(KisConfig, access_token)` 튜플을 세션 전체에서 공유 캐시한다.
+
+    `get_access_token` 자체도 파일 캐싱을 하지만, 그와 별개로 Streamlit
+    프로세스 안에서 매 위젯 상호작용(리런)마다 `.env`를 다시 읽고 캐시
+    파일을 여는 오버헤드를 없애기 위해 한 번 더 캐시한다.
+    """
     cfg = load_config()
     return cfg, get_access_token(cfg)
 
 
 @st.cache_data(ttl=60)
 def _account_balance():
+    """`get_account_balance` 캐시. 60초 TTL — 계좌 잔고는 실시간성이 가장
+    중요한 데이터라 다른 시세성 데이터보다 짧게 캐시한다."""
     cfg, token = _access_token()
     return get_account_balance(cfg, token)
 
 
 @st.cache_data(ttl=60 * 5)
 def _candles(stock_code: str, days: int):
+    """`get_daily_candles` 캐시. `(stock_code, days)` 조합별로 별도 캐시되므로
+    캔들차트의 종목 선택 셀렉트박스를 바꿔도 이전에 조회한 종목은 재요청하지 않는다."""
     cfg, token = _access_token()
     end_date = dt.date.today()
     start_date = end_date - dt.timedelta(days=days)
@@ -99,45 +131,68 @@ def _candles(stock_code: str, days: int):
 
 @st.cache_data(ttl=60 * 5)
 def _index_snapshots():
+    """`get_index_snapshots`(코스피/코스닥) 캐시."""
     cfg, token = _access_token()
     return get_index_snapshots(cfg, token)
 
 
 @st.cache_data(ttl=60 * 5)
 def _net_flow_ranking():
+    """`get_net_flow_ranking`(외국인/기관 순매수 상위 종목) 캐시."""
     cfg, token = _access_token()
     return get_net_flow_ranking(cfg, token, top_n=10)
 
 
 @st.cache_data(ttl=60 * 5)
 def _overseas_index_snapshots():
+    """`get_overseas_index_snapshots`(다우/나스닥/S&P500) 캐시."""
     cfg, token = _access_token()
     return get_overseas_index_snapshots(cfg, token)
 
 
 @st.cache_data(ttl=60 * 10)
 def _global_index_snapshots():
+    """`get_global_index_snapshots`(yfinance 기반 주변국 8개국 지수) 캐시.
+
+    KIS API를 쓰지 않는 유일한 캐시 함수라 `_access_token()`이 필요 없다.
+    TTL을 다른 KIS 데이터보다 길게(10분) 잡은 이유는 yfinance 호출이
+    상대적으로 느리고(8개 티커 병렬 다운로드), 주변국 지수는 분 단위로
+    바뀌어도 대시보드 판단에 큰 영향이 없기 때문이다.
+    """
     return get_global_index_snapshots()
 
 
 @st.cache_data(ttl=60 * 30)
 def _recent_executions(days: int):
+    """`get_recent_executions` 캐시. 체결내역은 자주 바뀌지 않아 30분으로 길게 캐시."""
     cfg, token = _access_token()
     return get_recent_executions(cfg, token, days=days)
 
 
 @st.cache_data(ttl=60)
 def _pension_deposit():
+    """`get_pension_deposit` 캐시. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
     cfg, token = _access_token()
     return get_pension_deposit(cfg, token)
 
 
 @st.cache_data(ttl=60 * 30)
 def _rate_signal():
+    """`get_rate_signal`(미국 10년물 금리) 캐시. 하루에도 크게 안 바뀌는
+    거시 지표라 30분으로 길게 캐시한다."""
     return get_rate_signal()
 
 
 def render_market_overview():
+    """"📈 시장 동향 (Macro)" 섹션 전체를 렌더링한다.
+
+    구성(위→아래): 코스피/코스닥 지수+시장폭 → 미국 3대 지수 쏠림 신호 →
+    주변국 8개국 지수(글로벌 연끌 확인용) → 위 셋을 조합한 삼박자 약세장
+    체크리스트 → 외국인/기관 순매수 랭킹(접이식) → 판단 기준 설명(접이식).
+    각 하위 블록은 독립적인 `try/except`로 감싸, 예를 들어 미국 지수 API가
+    실패해도 국내 지수·주변국 지수는 정상 표시되고, 체크리스트만 "계산 불가"로
+    표시된다(`overseas`/`peripherals`가 None이면 체크리스트를 건너뜀).
+    """
     st.subheader("📈 시장 동향 (Macro)")
 
     try:
@@ -258,6 +313,9 @@ def render_market_overview():
 
 
 def render_holdings():
+    """"보유 종목" 섹션(표 + 계좌 요약 지표)을 렌더링하고, 이후 렌더 함수들이
+    재사용할 수 있도록 조회한 `AccountBalance`를 그대로 반환한다.
+    """
     st.subheader("보유 종목")
     balance = _account_balance()
     if not balance.holdings:
@@ -291,6 +349,13 @@ def render_holdings():
 
 
 def render_investment_style(balance):
+    """"🧭 내 투자 스타일 진단" + "💰 예수금 현황" 섹션을 렌더링한다.
+
+    `is_pension_account(cfg)`로 계좌 유형을 판별해 두 갈래로 동작한다:
+    퇴직연금 계좌면 체결내역 API 한계를 경고 문구로 알리고 예수금 스냅샷을
+    보여주며, 일반 계좌면 매매빈도/분산도를 있는 그대로 진단한다
+    (`account_activity` 모듈 docstring의 계좌 유형별 API 지원 범위 참고).
+    """
     st.subheader("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)")
     st.caption(
         "실증 연구(자본시장연구원 개인투자자 성과 분석 등)에서 상대적으로 좋은 성과를 보인 "
@@ -347,6 +412,12 @@ TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
 
 
 def render_manual_transactions():
+    """"📝 매매 내역 (수동 기록)" 섹션 — `transactions.yaml`(git에는 커밋되지
+    않는 개인 파일, 형식은 `transactions.yaml.example` 참고)에 사용자가 직접
+    기록한 매매를 매수/매도 시계열 막대그래프 + 종목별 매수/매도 비교 표 +
+    전체 원장(접이식)으로 보여준다. KIS API가 체결내역을 제공하지 않는
+    계좌(퇴직연금 DC형 등)를 보완하기 위한 섹션이다.
+    """
     st.subheader("📝 매매 내역 (수동 기록)")
     st.caption(
         "퇴직연금 등 KIS Open API가 체결내역을 제공하지 않는 계좌를 위해, "
@@ -420,6 +491,8 @@ WATCHLIST_PATH = Path(__file__).parent.parent / "watchlist.yaml"
 
 
 def render_watchlist():
+    """"관심종목" 섹션 — `watchlist.yaml`을 표시하고 목록을 반환한다(보유종목과
+    합쳐 캔들차트 종목 선택지를 구성하는 데 재사용됨)."""
     st.subheader("관심종목")
     watchlist = load_watchlist(WATCHLIST_PATH)
     if not watchlist:
@@ -428,6 +501,12 @@ def render_watchlist():
 
 
 def render_candles(codes: list[tuple[str, str]]):
+    """"캔들 차트" 섹션 — `codes`(보유종목+관심종목 합친 (코드, 이름) 목록)
+    중 하나를 셀렉트박스로 골라 plotly 캔들스틱으로 그린다.
+
+    조회 실패(KIS 서버 5xx 등)를 여기서 잡아 경고만 띄우고 함수가 조기
+    반환하도록 해, 캔들 데이터 하나 때문에 페이지 전체가 죽지 않게 한다.
+    """
     st.subheader("캔들 차트")
     if not codes:
         st.info("표시할 종목이 없습니다.")
@@ -470,6 +549,13 @@ def render_candles(codes: list[tuple[str, str]]):
 
 
 def main():
+    """페이지 설정 → 비밀번호 게이트 → 각 섹션을 순서대로 렌더링하는 앱 엔트리포인트.
+
+    렌더링 순서(시장 동향 → 보유종목 → 투자스타일 진단 → 수동 매매기록 →
+    관심종목 → 캔들차트)는 "계좌 확인 전에 먼저 매크로 상황을 보여준다"는
+    의도로 배치했다. 마지막 "ℹ️ 관리 정보" 접이식 패널은 이 화면과 무관한
+    저장소/설정 정보라 항상 맨 아래 둔다.
+    """
     st.set_page_config(page_title="hantoo", page_icon=str(ICON_PATH), layout="wide")
     if not check_password():
         return

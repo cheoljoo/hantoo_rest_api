@@ -39,11 +39,14 @@ class AccountSummary:
 
 @dataclass(frozen=True)
 class AccountBalance:
+    """`get_account_balance` 반환값 — 보유 종목 목록과 계좌 요약을 함께 담는다."""
+
     holdings: list[StockHolding]
     summary: AccountSummary
 
 
 def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
+    """KIS REST API 공통 요청 헤더. `tr_id`(거래ID)만 API마다 다르게 넘겨준다."""
     return {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {access_token}",
@@ -55,7 +58,21 @@ def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
 
 
 def get_account_balance(cfg: KisConfig, access_token: str) -> AccountBalance:
-    """계좌의 보유 종목 및 요약 정보를 조회한다."""
+    """`/uapi/domestic-stock/v1/trading/inquire-balance`로 계좌 잔고를 조회한다.
+
+    실전투자는 tr_id `TTTC8434R`, 모의투자는 `VTTC8434R`을 사용한다(엔드포인트는
+    동일하고 tr_id로 실전/모의를 구분하는 것이 KIS API의 일반적인 패턴이다).
+    응답의 `output1`은 종목별 보유 내역 배열, `output2`는 계좌 요약(첫 번째 원소만
+    사용) 배열이다. `output1`에서 `hldg_qty`(보유수량)가 0인 항목(과거에 전량
+    매도했지만 이력상 남아있는 행 등)은 걸러내고 실제 보유 중인 종목만 반환한다.
+
+    이 API는 퇴직연금(DC형) 계좌에서도 정상 동작한다 — 체결내역/실현손익 조회
+    API와 달리 "현재 잔고 스냅샷"은 계좌 유형에 상관없이 제공되는 것으로 보인다
+    (`account_activity.py`의 계좌 유형별 API 지원 여부 정리 참고).
+
+    Raises:
+        RuntimeError: KIS API가 rt_cd != "0"으로 실패를 응답한 경우.
+    """
     tr_id = "VTTC8434R" if cfg.is_virtual else "TTTC8434R"
 
     params = {
