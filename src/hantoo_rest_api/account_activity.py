@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from dataclasses import dataclass
 
 import requests
@@ -46,6 +47,23 @@ def _headers(cfg: KisConfig, access_token: str, tr_id: str) -> dict[str, str]:
     }
 
 
+def _get_with_retry(
+    url: str, headers: dict[str, str], params: dict[str, str], *, retries: int = 2
+) -> dict:
+    """KIS API가 간헐적으로 5xx를 반환하는 경우를 위한 재시도 래퍼."""
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            time.sleep(0.5 * attempt)
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+    raise RuntimeError(f"API 호출 실패 ({url}): {last_error}")
+
+
 def _parse_execution(item: dict, default_date: dt.date) -> TradeExecution | None:
     qty = int(item.get("tot_ccld_qty", 0) or 0)
     if qty <= 0:
@@ -73,14 +91,11 @@ def _get_pension_executions(cfg: KisConfig, access_token: str) -> list[TradeExec
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": "",
     }
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_PENSION_DAILY_CCLD_PATH}",
-        headers=_headers(cfg, access_token, "TTTC2201R"),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, "TTTC2201R"),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     if data.get("rt_cd") != "0":
         raise RuntimeError(f"퇴직연금 체결 내역 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
@@ -109,14 +124,11 @@ def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
         "ACNT_PRDT_CD": cfg.account_product_cd,
         "ACCA_DVSN_CD": "00",
     }
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_PENSION_DEPOSIT_PATH}",
-        headers=_headers(cfg, access_token, "TTTC0506R"),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, "TTTC0506R"),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     if data.get("rt_cd") != "0":
         raise RuntimeError(f"퇴직연금 예수금 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
@@ -155,14 +167,11 @@ def get_recent_executions(
         "EXCG_ID_DVSN_CD": "KRX",
     }
 
-    resp = requests.get(
+    data = _get_with_retry(
         f"{cfg.base_url}{_DAILY_CCLD_PATH}",
-        headers=_headers(cfg, access_token, tr_id),
-        params=params,
-        timeout=10,
+        _headers(cfg, access_token, tr_id),
+        params,
     )
-    resp.raise_for_status()
-    data = resp.json()
 
     if data.get("rt_cd") != "0":
         if data.get("msg_cd") == _PENSION_ACCOUNT_ERROR_CODE:
