@@ -23,6 +23,15 @@ cp .env.example .env
 
 관심종목은 `watchlist.yaml`에 종목코드를 등록해서 관리합니다.
 
+### 계좌를 여러 개 쓰는 경우
+
+같은 HTS ID에 딸린 계좌(일반 위탁계좌, 퇴직연금 계좌, ISA 계좌 등)를 여러 개
+동시에 조회하려면, `.env`에 `KIS_APP_KEY_2`/`KIS_APP_SECRET_2`/`KIS_ACCOUNT_NO_2`
+... 형식으로 계좌를 추가하면 됩니다. **계좌마다 앱을 별도로 신청해서 각자의
+앱키/앱시크릿을 받아야 합니다** (실사용 확인: 앱키는 계좌 간에 공유되지 않음).
+자세한 예시는 `.env.example`을 참고하세요. 계좌가 2개 이상이면 웹 대시보드에
+계좌별 탭이 자동으로 생깁니다.
+
 > **Open API 신청 팁 (한투 고객센터 확인)**: Open API 신청 시 "전체계좌 표시"
 > 옵션은 필요 없습니다. 보유 계좌 중 1개를 선택해서 인증하면 그 계좌에 대해
 > Open API 이용이 가능합니다 — 즉 `KIS_ACCOUNT_NO`/`KIS_ACCOUNT_PRODUCT_CD`는
@@ -49,11 +58,13 @@ uv run streamlit run app.py
 ```
 
 비밀번호는 `web/.streamlit/secrets.toml`(git에는 커밋되지 않음, 최초 실행 시
-기본값으로 자동 생성)에서 관리합니다.
+기본값으로 자동 생성)에서 관리합니다. 계좌를 여러 개 등록했으면 계좌별 탭으로,
+1개면 탭 없이 바로 "보유 종목 / 투자 스타일 진단 / 예수금(D·D+1·D+2) / 수동
+매매기록"을 보여주고, 시장 동향·캔들차트는 계좌와 무관한 공용 섹션입니다.
 
 ## 모듈 구성
 
-- `config.py`: `.env` 기반 설정 로딩 (`KisConfig`, `load_config`)
+- `config.py`: `.env` 기반 설정 로딩, 계좌 1개 또는 여러 개 지원 (`KisConfig`, `load_config`, `load_configs`)
 - `auth.py`: 접근토큰(access token) 발급 및 파일 캐싱 (`get_access_token`)
 - `account.py`: 계좌 잔고 조회 (`get_account_balance`) — 보유 종목별 매입가/평가금액/평가손익
 - `account_activity.py`: 매매 체결내역/예수금 조회 및 매매빈도·분산도 진단
@@ -115,6 +126,26 @@ uv run streamlit run app.py
   하나만 두므로, 루트에서 `uv run`만 하면 `web/`의 의존성(streamlit 등)이
   설치되지 않는다 — `uv sync --package hantoo-web`으로 해당 멤버의 의존성까지
   같은 venv에 동기화해야 한다.
+- **다중 계좌 지원 시 토큰 캐시 충돌 버그**: 계좌를 여러 개(서로 다른 앱키) 쓰게
+  되면서, 기존에 `base_url`(실전/모의 구분)만으로 토큰을 캐시하던 로직이
+  버그로 드러났다 — 같은 실전투자 서버를 쓰는 두 계좌가 서로의 토큰을 캐시
+  파일에서 덮어써 **엉뚱한 계좌 자격증명으로 API를 호출할 뻔했다**. 캐시 키에
+  `app_key`까지 포함하도록 고쳤다(`auth.py`의 `_cache_key`). 계좌/자격증명이
+  여러 개로 늘어날 걸 처음부터 고려하지 않으면 이런 종류의 "키가 충분히
+  구체적이지 않은" 캐싱 버그가 생기기 쉽다.
+- **Streamlit 다중 탭에서 위젯/차트 ID 충돌**: 계좌별 `st.tabs` 안에서 각
+  탭이 동일한 매개변수로 `st.plotly_chart`/`st.dataframe`을 그리면(예:
+  두 계좌 모두 매매 기록이 없어 내용이 완전히 같은 경우) Streamlit이
+  자동 생성하는 element ID가 겹쳐 `StreamlitDuplicateElementId` 예외가
+  난다. 반복 렌더링되는 컴포넌트에는 `key=f"...{cfg.account_no}"`처럼
+  계좌 식별자를 포함한 고유 key를 명시적으로 줘야 한다.
+- **같은 계좌 요약 API라도 계좌 유형에 따라 특정 필드가 0으로 나올 수 있음**:
+  일반 잔고조회(`inquire-balance`)의 예수금 관련 필드(`dnca_tot_amt`/
+  `nxdy_excc_amt`/`prvs_rcdl_excc_amt`/`cma_evlu_amt`)는 일반 위탁계좌에서는
+  정상 값을 주지만, 퇴직연금(DC형) 계좌에서는 실제 예수금(48,611원 확인)이
+  있는데도 전부 0을 반환했다. 같은 API·같은 필드 이름이라도 계좌 유형별로
+  실제 값이 채워지는지 별도로 확인해야 하며, 이 경우엔 퇴직연금 전용
+  예수금조회 API(`get_pension_deposit`)로 대체해서 해결했다.
 
 ## 한투 REST API로 안 되는 것들 (계좌 유형별)
 
@@ -136,6 +167,7 @@ uv run streamlit run app.py
 | 체결내역(매매이력) 조회 | 일반 계좌용 API는 `APBK1744` 오류로 거부, 퇴직연금 전용 API로 바꿔도 항상 빈 배열 (실제 매매가 있었어도) |
 | 실현손익 조회 | 값이 전부 0으로 나옴 (사실상 미지원) |
 | 입출금 이력 | A 항목과 동일하게 원장 조회는 없음. 예수금 "현재 잔액" 스냅샷은 예외적으로 가능(문서는 "55번 계좌 불가"라 적혀 있지만 실측 결과 정상 동작) |
+| 일반 잔고조회의 예수금 필드 | `inquire-balance`가 주는 예수금 D/D+1/D+2, CMA(현금성 자산) 필드가 이 계좌 유형에서는 전부 0으로 나옴(실제 예수금이 있어도) — 반드시 퇴직연금 전용 예수금조회 API(`get_pension_deposit`)로 조회해야 함 |
 
 ### C. ISA / 일반 위탁계좌 — 미검증
 
