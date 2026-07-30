@@ -26,12 +26,16 @@
   정상 동작한다 — 공식 문서에는 "55번 계좌는 이용 불가"라고 적혀 있었지만 실제로는
   정상 응답이 왔다. **문서상 경고와 실제 동작이 다를 수 있으니, 계좌 유형별 API
   가용 여부는 문서보다 실측으로 확인하는 것이 안전하다.**
-- **DC형 계좌는 일반 잔고조회(`inquire-balance`)의 예수금 필드가 전부 0으로 나온다.**
-  실측 결과 이 계좌는 실제로 예수금이 있었는데도(예: 48,611원) `inquire-balance`
-  응답의 `dnca_tot_amt`/`nxdy_excc_amt`/`prvs_rcdl_excc_amt`/`cma_evlu_amt`가
-  모두 0이었고, 대신 `get_pension_deposit`(퇴직연금 전용 예수금조회)로 조회하면
-  정확한 값이 나왔다. 그래서 웹 대시보드는 `is_pension_account(cfg)`가 True면
-  일반 잔고조회 대신 이 함수를 써서 예수금을 보여준다.
+- **DC형 계좌는 일반 잔고조회(`inquire-balance`)가 이 계좌의 현금(예수금)을 아예
+  인식하지 못한다.** 실측 결과 이 계좌는 실제로 현금(48,611원)이 있었는데도
+  `inquire-balance` 응답의 `dnca_tot_amt`(D)/`nxdy_excc_amt`(D+1)/
+  `cma_evlu_amt`(CMA)가 모두 0이었다. 반면 `prvs_rcdl_excc_amt`(D+2)는 0이 아니라
+  최근 매매(주식 매도) 결제로 들어올 금액을 정상적으로 보여줬다 — 즉 이 API는
+  "현금 잔고" 자체는 못 보지만 "매매 결제 예정 금액"은 별도로 정상 추적한다.
+  `get_pension_deposit`(퇴직연금 전용 예수금조회)로 조회하면 그 현금(48,611원)이
+  정확히 나온다. 두 값의 성격이 다르므로(현금 잔고 vs. 결제 예정 금액) 웹
+  대시보드는 이를 합산하지 않고, `get_pension_deposit`의 값은 "현금성 자산"으로,
+  `inquire-balance`의 D/D+1/D+2는 원래 값 그대로 별도로 보여준다(사용자 확인).
 """
 
 from __future__ import annotations

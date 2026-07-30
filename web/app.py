@@ -370,30 +370,27 @@ def render_holdings(cfg: KisConfig):
 
     st.markdown("**💰 예수금 (D / D+1 / D+2)**")
     if is_pension_account(cfg):
-        col3.metric("현금성 자산 (CMA)", "해당없음")
         try:
             deposit = _pension_deposit(cfg)
         except Exception as e:
+            col3.metric("현금성 자산 (CMA)", "조회 실패")
             st.warning(f"퇴직연금 예수금 조회 실패: {e}")
         else:
-            # 퇴직연금 전용 예수금조회(deposit)는 "지금 바로 쓸 수 있는 현금" 기준값을
-            # 주고, 일반 잔고조회(s)의 D+1/D+2는 최근 매매가 결제되면서 추가로
-            # 들어올 금액을 알려준다 — 이 계좌는 두 API가 서로 다른 것을 보여주므로
-            # 실제 D/D+1/D+2 총액은 둘을 더해야 나온다(사용자 확인).
+            # 퇴직연금(DC형) 계좌는 일반 잔고조회 API가 이 계좌의 현금(예수금)을
+            # 아예 인식하지 못해(D/D+1이 항상 0) 그 현금은 별도로 "현금성 자산"으로
+            # 표시하고, D/D+1/D+2는 일반 잔고조회 API가 주는 값을 그대로(가공 없이)
+            # 보여준다 — D+2는 매매 결제로 추가 반영되는 금액이라 현금과는 성격이
+            # 다른 별개의 값이라 합산하지 않는다(사용자 확인).
+            col3.metric("현금성 자산 (CMA)", f"{deposit.deposit_total:,.0f}")
             d_col1, d_col2, d_col3 = st.columns(3)
-            d_col1.metric("D (예수금총액)", f"{deposit.deposit_total + s.deposit_total:,.0f}")
-            d_col2.metric(
-                "D+1 (익일 인출가능)",
-                f"{deposit.next_day_withdrawable + s.next_day_withdrawable:,.0f}",
-            )
-            d_col3.metric(
-                "D+2 (최종 인출가능)",
-                f"{deposit.next_day_withdrawable + s.next_2day_withdrawable:,.0f}",
-            )
+            d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
+            d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
+            d_col3.metric("D+2 (결제예정금액)", f"{s.next_2day_withdrawable:,.0f}")
             st.caption(
-                "퇴직연금(DC형) 계좌는 '지금 바로 쓸 수 있는 현금'(전용 예수금조회 API)과 "
-                "'매매 결제로 추가 반영되는 금액'(일반 잔고조회 API의 D+1/D+2)을 합산한 "
-                "값입니다. CMA(현금성 자산)는 전용 API에 없어 제공되지 않습니다."
+                "퇴직연금(DC형) 계좌의 현금은 일반 잔고조회 API에 안 잡혀 전용 "
+                "예수금조회 API 값을 '현금성 자산'으로 표시합니다. D/D+1/D+2는 "
+                "일반 잔고조회 API 값 그대로이며, D+2는 최근 매매가 결제되며 "
+                "추가로 반영될 금액(현금성 자산과는 별개)입니다."
             )
     else:
         col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
