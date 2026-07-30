@@ -26,6 +26,12 @@
   정상 동작한다 — 공식 문서에는 "55번 계좌는 이용 불가"라고 적혀 있었지만 실제로는
   정상 응답이 왔다. **문서상 경고와 실제 동작이 다를 수 있으니, 계좌 유형별 API
   가용 여부는 문서보다 실측으로 확인하는 것이 안전하다.**
+- **DC형 계좌는 일반 잔고조회(`inquire-balance`)의 예수금 필드가 전부 0으로 나온다.**
+  실측 결과 이 계좌는 실제로 예수금이 있었는데도(예: 48,611원) `inquire-balance`
+  응답의 `dnca_tot_amt`/`nxdy_excc_amt`/`prvs_rcdl_excc_amt`/`cma_evlu_amt`가
+  모두 0이었고, 대신 `get_pension_deposit`(퇴직연금 전용 예수금조회)로 조회하면
+  정확한 값이 나왔다. 그래서 웹 대시보드는 `is_pension_account(cfg)`가 True면
+  일반 잔고조회 대신 이 함수를 써서 예수금을 보여준다.
 """
 
 from __future__ import annotations
@@ -157,11 +163,21 @@ def _get_pension_executions(cfg: KisConfig, access_token: str) -> list[TradeExec
 
 @dataclass(frozen=True)
 class PensionDeposit:
-    """퇴직연금 계좌 예수금 스냅샷 (거래내역이 아닌 '현재 잔액')."""
+    """퇴직연금 계좌 예수금 스냅샷 (거래내역이 아닌 '현재 잔액').
 
-    deposit_total: float  # 예수금총액
-    next_day_settlement: float  # 익일정산금액
-    next_2day_settlement: float  # 익2일정산금액
+    실측 결과, 이 계좌 유형은 일반 잔고조회(`inquire-balance`)의 예수금
+    관련 필드(`dnca_tot_amt`/`nxdy_excc_amt`/`prvs_rcdl_excc_amt`/
+    `cma_evlu_amt`)가 전부 0으로 나온다 — 대신 이 퇴직연금 전용 API로
+    조회해야 실제 값(D/D+1)이 보인다. `next_day_settlement`/
+    `next_2day_settlement`는 D+1/D+2 시점의 "총 인출가능금액"이 아니라
+    그 날 추가로 정산되어 들어올 예정 금액(델타)이라 일반 계좌의
+    D/D+1/D+2 총액과 성격이 다르다는 점에 주의할 것.
+    """
+
+    deposit_total: float  # 예수금총액, D (dnca_tota)
+    next_day_withdrawable: float  # 익일 인출가능금액, D+1 (nxdy_excc_amt)
+    next_day_settlement: float  # 익일 정산예정금액 (nxdy_sttl_amt)
+    next_2day_settlement: float  # 익2일 정산예정금액 (nx2_day_sttl_amt)
 
 
 def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
@@ -192,6 +208,7 @@ def get_pension_deposit(cfg: KisConfig, access_token: str) -> PensionDeposit:
     o = data.get("output", {})
     return PensionDeposit(
         deposit_total=float(o.get("dnca_tota", 0) or 0),
+        next_day_withdrawable=float(o.get("nxdy_excc_amt", 0) or 0),
         next_day_settlement=float(o.get("nxdy_sttl_amt", 0) or 0),
         next_2day_settlement=float(o.get("nx2_day_sttl_amt", 0) or 0),
     )

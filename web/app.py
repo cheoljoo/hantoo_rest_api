@@ -19,6 +19,7 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.account_activity import (
     diversification_score,
+    get_pension_deposit,
     get_recent_executions,
     investment_style_signal,
     is_pension_account,
@@ -174,6 +175,15 @@ def _recent_executions(cfg: KisConfig, days: int):
     """`get_recent_executions` 캐시. 체결내역은 자주 바뀌지 않아 30분으로 길게 캐시."""
     token = _access_token(cfg)
     return get_recent_executions(cfg, token, days=days)
+
+
+@st.cache_data(ttl=60)
+def _pension_deposit(cfg: KisConfig):
+    """`get_pension_deposit` 캐시. 퇴직연금 계좌는 일반 잔고조회의 예수금
+    필드가 0으로 나와(`account_activity` 모듈 docstring 참고) 이 전용 API로
+    보완한다. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
+    token = _access_token(cfg)
+    return get_pension_deposit(cfg, token)
 
 
 @st.cache_data(ttl=60 * 30)
@@ -357,17 +367,34 @@ def render_holdings(cfg: KisConfig):
     col1, col2, col3 = st.columns(3)
     col1.metric("총평가금액", f"{s.total_eval_amount:,.0f}")
     col2.metric("평가손익합계", f"{s.total_eval_profit_loss:,.0f}")
-    col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
 
     st.markdown("**💰 예수금 (D / D+1 / D+2)**")
-    st.caption(
-        "국내 주식 결제가 T+2(매매일+2영업일)로 이뤄지는 것을 반영한 3단계 예수금입니다. "
-        "일반 계좌·퇴직연금 계좌 모두 동일하게 제공됩니다."
-    )
-    d_col1, d_col2, d_col3 = st.columns(3)
-    d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
-    d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
-    d_col3.metric("D+2 (최종 인출가능)", f"{s.next_2day_withdrawable:,.0f}")
+    if is_pension_account(cfg):
+        col3.metric("현금성 자산 (CMA)", "해당없음")
+        try:
+            deposit = _pension_deposit(cfg)
+        except Exception as e:
+            st.warning(f"퇴직연금 예수금 조회 실패: {e}")
+        else:
+            d_col1, d_col2, d_col3 = st.columns(3)
+            d_col1.metric("D (예수금총액)", f"{deposit.deposit_total:,.0f}")
+            d_col2.metric("D+1 (익일 인출가능)", f"{deposit.next_day_withdrawable:,.0f}")
+            d_col3.metric("익일/익2일 정산예정", f"{deposit.next_day_settlement:,.0f} / {deposit.next_2day_settlement:,.0f}")
+            st.caption(
+                "퇴직연금(DC형) 계좌는 일반 잔고조회 API의 예수금 필드가 0으로 나와 "
+                "퇴직연금 전용 예수금조회 API 값을 사용합니다. CMA(현금성 자산)는 "
+                "이 API에서 제공되지 않습니다. 마지막 값은 D+2 시점의 총 인출가능금액이 "
+                "아니라 추가로 정산되어 들어올 예정 금액(델타)입니다."
+            )
+    else:
+        col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
+        st.caption(
+            "국내 주식 결제가 T+2(매매일+2영업일)로 이뤄지는 것을 반영한 3단계 예수금입니다."
+        )
+        d_col1, d_col2, d_col3 = st.columns(3)
+        d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
+        d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
+        d_col3.metric("D+2 (최종 인출가능)", f"{s.next_2day_withdrawable:,.0f}")
 
     return balance
 
@@ -409,9 +436,10 @@ def render_investment_style(cfg: KisConfig, balance):
         )
 
     st.caption(
-        "예수금(D/D+1/D+2)과 현금성 자산(CMA)은 위 '보유 종목' 섹션에 계좌 유형과 무관하게 "
-        "표시됩니다 — 이 값은 현재 잔액 스냅샷이며, 언제 얼마가 입출금됐는지의 이력(원장)은 "
-        "어떤 계좌 유형이든 KIS Open API로 조회할 수 없어 HTS/MTS 앱에서 확인해야 합니다."
+        "예수금(D/D+1/D+2)은 위 '보유 종목' 섹션에 계좌 유형에 맞는 API로 표시됩니다 "
+        "(퇴직연금은 전용 예수금조회 API, 일반 계좌는 잔고조회 API의 D/D+1/D+2 필드) — "
+        "이 값은 현재 잔액 스냅샷이며, 언제 얼마가 입출금됐는지의 이력(원장)은 어떤 계좌 "
+        "유형이든 KIS Open API로 조회할 수 없어 HTS/MTS 앱에서 확인해야 합니다."
     )
 
 
