@@ -106,16 +106,22 @@ def _auth_cookie_value() -> str:
 
 
 def _cookie_manager() -> stx.CookieManager:
-    """세션 전체에서 하나의 `CookieManager` 컴포넌트를 공유한다.
+    """`CookieManager`를 매 스크립트 실행(rerun)마다 새로 만든다.
 
-    `CookieManager`는 내부적으로 커스텀 컴포넌트(위젯)를 호출하는데, Streamlit은
-    `@st.cache_data`/`@st.cache_resource`로 감싼 함수 안에서 위젯을 만드는 것을
-    금지한다("widget command in a cached function" 오류) — 그래서 캐시 데코레이터
-    대신 `st.session_state`에 인스턴스를 직접 보관해 재사용한다.
+    `CookieManager.__init__`은 내부적으로 커스텀 컴포넌트를 호출해 브라우저의
+    쿠키 값을 가져오는데, 이 값은 최초 호출 시 비동기로 도착한다 — 실제 쿠키
+    값이 아직 안 왔으면 `default={}`를 즉시 반환하고, 브라우저에서 값이
+    도착하면 Streamlit이 "컴포넌트 반환값이 바뀌었다"고 판단해 스크립트를
+    자동으로 다시 실행해준다. **이 재실행마다 `CookieManager`를 다시
+    생성해서 컴포넌트를 다시 호출해야만** 새로 도착한 쿠키 값을 읽을 수 있다.
+
+    이전에는 `@st.cache_resource`(위젯을 캐시 함수 안에서 만들 수 없어 에러)와
+    `st.session_state` 캐싱(재실행 시 컴포넌트를 다시 호출하지 않아 쿠키 값이
+    영원히 `{}`로 고정되는 버그, F5 새로고침 시 로그인 유지가 안 되는 원인이었음)
+    을 시도했다가 둘 다 실패했다 — 결론은 "캐시하지 말고 매번 새로 만드는 것"이
+    맞는 사용법이다(라이브러리 공식 예제와도 일치).
     """
-    if "cookie_manager" not in st.session_state:
-        st.session_state["cookie_manager"] = stx.CookieManager(key="hantoo_cookie_manager")
-    return st.session_state["cookie_manager"]
+    return stx.CookieManager(key="hantoo_cookie_manager")
 
 
 def check_password() -> bool:
