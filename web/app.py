@@ -9,10 +9,12 @@ systemd(`hantooweb.service`) + nginx 리버스 프록시로 `psncs.iptime.org/ha
 섹션은 계속 보인다).
 """
 
+import hashlib
 import sys
 import tomllib
 from pathlib import Path
 
+import extra_streamlit_components as stx
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -88,13 +90,53 @@ def load_password() -> str:
 PASSWORD = load_password()
 
 
+AUTH_COOKIE_NAME = "hantoo_auth"
+AUTH_COOKIE_MAX_AGE_DAYS = 7
+
+
+def _auth_cookie_value() -> str:
+    """현재 비밀번호에 종속된 쿠키 값(sha256 해시)을 계산한다.
+
+    비밀번호 원문 대신 해시를 쿠키에 저장하는 이유는 브라우저 쿠키가
+    평문으로 노출되기 때문이다. 비밀번호를 바꾸면 이 해시도 바뀌므로,
+    `secrets.toml`을 수정하는 것만으로 기존에 발급된 모든 쿠키가 자동으로
+    무효화된다(별도 로그아웃 처리 없이도 비밀번호 변경 = 강제 로그아웃).
+    """
+    return hashlib.sha256(PASSWORD.encode()).hexdigest()
+
+
+def _cookie_manager() -> stx.CookieManager:
+    """세션 전체에서 하나의 `CookieManager` 컴포넌트를 공유한다.
+
+    `CookieManager`는 내부적으로 커스텀 컴포넌트(위젯)를 호출하는데, Streamlit은
+    `@st.cache_data`/`@st.cache_resource`로 감싼 함수 안에서 위젯을 만드는 것을
+    금지한다("widget command in a cached function" 오류) — 그래서 캐시 데코레이터
+    대신 `st.session_state`에 인스턴스를 직접 보관해 재사용한다.
+    """
+    if "cookie_manager" not in st.session_state:
+        st.session_state["cookie_manager"] = stx.CookieManager(key="hantoo_cookie_manager")
+    return st.session_state["cookie_manager"]
+
+
 def check_password() -> bool:
-    """비밀번호 게이트. 인증 성공 시 `st.session_state["authed"]`를 세워 다음
-    렌더부터는 폼을 건너뛴다. 인증 전에는 항상 False를 반환해 `main()`이
-    나머지 화면을 그리지 않고 조기 종료하도록 한다.
+    """비밀번호 게이트. `st.session_state["authed"]`(이번 브라우저 세션 동안만
+    유지)와 `AUTH_COOKIE_NAME` 쿠키(브라우저에 최대 7일간 저장, 서버 재시작과
+    무관하게 유지됨) 둘 중 하나라도 유효하면 통과시킨다.
+
+    쿠키는 비밀번호를 맞혀서 로그인에 성공한 시점에만 새로 굽는다(`cookie_manager.set`).
+    다음에 다시 물어보게 되는 경우: (1) 7일 경과, (2) 브라우저/기기를 바꾸거나
+    쿠키를 지운 경우, (3) `secrets.toml`의 비밀번호가 바뀐 경우(해시가 달라져
+    기존 쿠키가 무효화됨). 반대로 systemd 서비스 재시작은 쿠키가 브라우저 쪽에
+    저장되어 있어 영향을 주지 않는다.
     """
     if st.session_state.get("authed"):
         return True
+
+    cookie_manager = _cookie_manager()
+    if cookie_manager.get(cookie=AUTH_COOKIE_NAME) == _auth_cookie_value():
+        st.session_state["authed"] = True
+        return True
+
     st.title("hantoo 접근")
     with st.form("password_form"):
         pw = st.text_input("Password", type="password")
@@ -102,6 +144,12 @@ def check_password() -> bool:
     if submitted:
         if pw == PASSWORD:
             st.session_state["authed"] = True
+            cookie_manager.set(
+                AUTH_COOKIE_NAME,
+                _auth_cookie_value(),
+                expires_at=dt.datetime.now() + dt.timedelta(days=AUTH_COOKIE_MAX_AGE_DAYS),
+                key="set_auth_cookie",
+            )
             st.rerun()
         else:
             st.error("비밀번호가 틀렸습니다.")
