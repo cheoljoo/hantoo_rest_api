@@ -34,6 +34,8 @@ from hantoo_rest_api.global_indices import (
     peripheral_negative_count,
     peripheral_signal,
 )
+from hantoo_rest_api.asset_status import get_asset_status
+from hantoo_rest_api.overseas import get_overseas_balance, get_overseas_executions
 from hantoo_rest_api.macro_checklist import build_macro_checklist, get_rate_signal
 from hantoo_rest_api.manual_transactions import (
     filter_by_account,
@@ -252,6 +254,28 @@ def _pension_deposit(cfg: KisConfig):
     return get_pension_deposit(cfg, token)
 
 
+@st.cache_data(ttl=60)
+def _asset_status(cfg: KisConfig):
+    """`get_asset_status`(자산군별 현황) 캐시. 금현물/CMA처럼 일반 잔고조회가
+    안 되는 계좌의 대체 조회용. 60초 TTL."""
+    token = _access_token(cfg)
+    return get_asset_status(cfg, token)
+
+
+@st.cache_data(ttl=60)
+def _overseas_balance(cfg: KisConfig):
+    """`get_overseas_balance`(해외 보유종목/외화 예수금) 캐시. 60초 TTL."""
+    token = _access_token(cfg)
+    return get_overseas_balance(cfg, token)
+
+
+@st.cache_data(ttl=60 * 30)
+def _overseas_executions(cfg: KisConfig, days: int):
+    """`get_overseas_executions`(해외주식 체결내역) 캐시."""
+    token = _access_token(cfg)
+    return get_overseas_executions(cfg, token, days=days)
+
+
 @st.cache_data(ttl=60 * 30)
 def _rate_signal():
     """`get_rate_signal`(미국 10년물 금리) 캐시. 하루에도 크게 안 바뀌는
@@ -405,7 +429,37 @@ def render_holdings(cfg: KisConfig):
     try:
         balance = _account_balance(cfg)
     except Exception as e:
-        st.error(f"계좌 조회 실패 ({cfg.display_label}): {e}")
+        # 금현물/CMA 계좌는 일반 잔고조회를 거절한다 — 자산군별 현황 API로 대체.
+        try:
+            status = _asset_status(cfg)
+        except Exception as e2:
+            st.error(f"계좌 조회 실패 ({cfg.display_label}): {e} / 자산현황: {e2}")
+            return None
+        st.info(
+            f"이 계좌 유형은 종목별 잔고조회가 불가({e})하여 자산군별 현황만 표시합니다."
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("총자산", f"{status.total_asset:,.0f}")
+        c2.metric("평가손익", f"{status.eval_profit_loss:,.0f}")
+        c3.metric("예수금", f"{status.deposit:,.0f}")
+        if status.categories:
+            st.dataframe(
+                [
+                    {
+                        "자산군": c.name,
+                        "매입금액": c.purchase_amount,
+                        "평가금액": c.eval_amount,
+                        "평가손익": c.eval_profit_loss,
+                        "비중(%)": c.weight_pct,
+                    }
+                    for c in status.categories
+                ],
+                width="stretch",
+                hide_index=True,
+                key=f"asset_status_{cfg.account_no}",
+            )
+        else:
+            st.caption("조회된 자산이 없습니다 (API가 모두 0을 반환).")
         return None
     if not balance.holdings:
         st.info("보유 중인 종목이 없습니다.")
@@ -516,6 +570,90 @@ def render_investment_style(cfg: KisConfig, balance):
 
 
 TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
+
+
+def render_overseas(cfg: KisConfig):
+    """"🌏 해외주식 / 외화" 섹션 — 해외 보유종목, 통화별 외화 예수금, 최근 90일
+    해외 체결내역. 국내용 잔고조회(`inquire-balance`)에는 잡히지 않는 자산이다.
+    퇴직연금 계좌는 해외주식 API 대상이 아니라 호출하지 않고, 조회 실패는
+    다른 섹션에 영향이 없도록 경고로만 표시한다.
+    """
+    if is_pension_account(cfg):
+        return
+    st.subheader("🌏 해외주식 / 외화")
+    try:
+        ob = _overseas_balance(cfg)
+    except Exception as e:
+        st.warning(f"해외 잔고 조회 실패 ({cfg.display_label}): {e}")
+        return
+
+    if ob.holdings:
+        st.dataframe(
+            [
+                {
+                    "종목명": h.name,
+                    "종목코드": h.code,
+                    "시장": h.market,
+                    "통화": h.currency,
+                    "수량": h.quantity,
+                    "평균단가": h.avg_price,
+                    "현재가": h.current_price,
+                    "평가금액": h.eval_amount,
+                    "평가손익": h.eval_profit_loss,
+                    "손익률(%)": h.eval_profit_loss_rate,
+                }
+                for h in ob.holdings
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"overseas_holdings_{cfg.account_no}",
+        )
+    else:
+        st.info("보유 중인 해외주식이 없습니다.")
+
+    if ob.cash:
+        st.dataframe(
+            [
+                {"통화": c.currency, "외화 예수금": c.deposit, "출금가능": c.withdrawable}
+                for c in ob.cash
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"overseas_cash_{cfg.account_no}",
+        )
+    s = ob.summary
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총자산 (원화환산)", f"{s.total_asset_krw:,.0f}")
+    c2.metric("총예수금 (원화환산)", f"{s.total_deposit_krw:,.0f}")
+    c3.metric("해외 평가손익 (원화)", f"{s.eval_profit_loss_krw:,.0f}")
+
+    try:
+        execs = _overseas_executions(cfg, 90)
+    except Exception as e:
+        st.warning(f"해외 체결내역 조회 실패: {e}")
+        return
+    st.markdown("**해외주식 체결내역 (최근 90일)**")
+    if not execs:
+        st.info("최근 90일간 해외주식 체결내역이 없습니다.")
+    else:
+        st.dataframe(
+            [
+                {
+                    "일자": x.date,
+                    "종목명": x.name,
+                    "종목코드": x.code,
+                    "구분": x.side,
+                    "수량": x.quantity,
+                    "체결단가": x.price,
+                    "체결금액": x.amount,
+                    "통화": x.currency,
+                }
+                for x in execs
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"overseas_execs_{cfg.account_no}",
+        )
 
 
 def render_manual_transactions(cfg: KisConfig):
@@ -805,6 +943,7 @@ def render_account_section(cfg: KisConfig):
     balance = render_holdings(cfg)
     if balance is None:
         return None
+    render_overseas(cfg)
     render_investment_style(cfg, balance)
     render_manual_transactions(cfg)
     return balance
@@ -826,6 +965,15 @@ def main():
     st.set_page_config(page_title="hantoo", page_icon=str(ICON_PATH), layout="wide")
     if not check_password():
         return
+
+    # 페이지를 새로 열거나 F5로 새로고침하면 Streamlit이 새 세션을 만들어
+    # `session_state`가 비어 있다. 이때 한 번만 데이터 캐시를 비워서 TTL이 남아
+    # 있어도 최신 값을 다시 조회하게 한다. 같은 세션 안의 위젯 조작(리런)은
+    # 이 플래그 덕분에 캐시를 그대로 써서 KIS API 호출이 불필요하게 늘지 않는다.
+    # (토큰은 `cache_resource`라 비우지 않아 재발급 없이 재사용된다.)
+    if not st.session_state.get("_fresh_loaded"):
+        st.cache_data.clear()
+        st.session_state["_fresh_loaded"] = True
 
     now = dt.datetime.now()
     st.title("한국투자증권 계좌 대시보드")
