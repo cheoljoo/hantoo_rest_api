@@ -255,7 +255,7 @@ def get_recent_executions(
         "INQR_DVSN_1": "",
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": "",
-        "EXCG_ID_DVSN_CD": "KRX",
+        "EXCG_ID_DVSN_CD": "ALL",  # KRX만 쓰면 SOR(스마트주문) 체결이 빠진다
     }
 
     data = _get_with_retry(
@@ -334,7 +334,7 @@ def get_full_executions(
                 "INQR_DVSN_1": "",
                 "CTX_AREA_FK100": fk,
                 "CTX_AREA_NK100": nk,
-                "EXCG_ID_DVSN_CD": "KRX",
+                "EXCG_ID_DVSN_CD": "ALL",  # KRX만 쓰면 SOR(스마트주문) 체결이 빠진다
             }
             headers = _headers(cfg, access_token, tr_id)
             if nk.strip():
