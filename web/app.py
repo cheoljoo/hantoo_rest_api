@@ -21,6 +21,7 @@ import streamlit as st
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.account_activity import (
     diversification_score,
+    get_full_executions,
     get_pension_deposit,
     get_recent_executions,
     investment_style_signal,
@@ -35,6 +36,12 @@ from hantoo_rest_api.global_indices import (
     peripheral_signal,
 )
 from hantoo_rest_api.asset_status import get_asset_status
+from hantoo_rest_api.kiwoom import (
+    KiwoomConfig,
+    get_kiwoom_balance,
+    get_kiwoom_history,
+    load_kiwoom_configs,
+)
 from hantoo_rest_api.overseas import get_overseas_balance, get_overseas_executions
 from hantoo_rest_api.macro_checklist import build_macro_checklist, get_rate_signal
 from hantoo_rest_api.manual_transactions import (
@@ -245,6 +252,14 @@ def _recent_executions(cfg: KisConfig, days: int):
     return get_recent_executions(cfg, token, days=days)
 
 
+@st.cache_data(ttl=60 * 30)
+def _full_executions(cfg: KisConfig):
+    """`get_full_executions`(최대 15년 체결 이력, DC 포함) 캐시. 창 15개를 읽어
+    느리므로 30분 캐시한다."""
+    token = _access_token(cfg)
+    return get_full_executions(cfg, token)
+
+
 @st.cache_data(ttl=60)
 def _pension_deposit(cfg: KisConfig):
     """`get_pension_deposit` 캐시. 퇴직연금 계좌는 일반 잔고조회의 예수금
@@ -260,6 +275,19 @@ def _asset_status(cfg: KisConfig):
     안 되는 계좌의 대체 조회용. 60초 TTL."""
     token = _access_token(cfg)
     return get_asset_status(cfg, token)
+
+
+@st.cache_data(ttl=60)
+def _kiwoom_balance(cfg: KiwoomConfig):
+    """`get_kiwoom_balance`(키움 보유종목+예수금) 캐시. 60초 TTL."""
+    return get_kiwoom_balance(cfg)
+
+
+@st.cache_data(ttl=60 * 30)
+def _kiwoom_history(cfg: KiwoomConfig):
+    """`get_kiwoom_history`(키움 위탁종합거래내역, 최대 10년) 캐시. 창 10개를
+    페이지 단위로 읽어 느리므로 30분 캐시한다."""
+    return get_kiwoom_history(cfg)
 
 
 @st.cache_data(ttl=60)
@@ -528,10 +556,9 @@ def render_holdings(cfg: KisConfig):
 def render_investment_style(cfg: KisConfig, balance):
     """"🧭 내 투자 스타일 진단" + "💰 예수금 현황" 섹션을 렌더링한다.
 
-    `is_pension_account(cfg)`로 계좌 유형을 판별해 두 갈래로 동작한다:
-    퇴직연금 계좌면 체결내역 API 한계를 경고 문구로 알리고 예수금 스냅샷을
-    보여주며, 일반 계좌면 매매빈도/분산도를 있는 그대로 진단한다
-    (`account_activity` 모듈 docstring의 계좌 유형별 API 지원 범위 참고).
+    매매빈도는 `get_full_executions`(tr_id CTSC9215R)의 최근 90일분으로 계산한다.
+    이 API는 DC 퇴직연금 계좌에서도 체결 이력을 주므로 모든 계좌 유형에서
+    진단 결과를 신뢰할 수 있다.
     """
     st.subheader("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)")
     st.caption(
@@ -540,9 +567,9 @@ def render_investment_style(cfg: KisConfig, balance):
     )
 
     hhi, top_weight_pct = diversification_score(balance.holdings)
-    pension = is_pension_account(cfg)
     try:
-        executions = _recent_executions(cfg, 90)
+        cutoff = dt.date.today() - dt.timedelta(days=90)
+        executions = [e for e in _full_executions(cfg) if e.date >= cutoff]
     except Exception as e:
         st.warning(f"최근 체결 내역 조회 실패: {e}")
         executions = []
@@ -553,14 +580,7 @@ def render_investment_style(cfg: KisConfig, balance):
     col2.metric("월평균 매매빈도", f"{activity.trades_per_month:.1f}건/월")
     col3.metric("최대 종목 비중", f"{top_weight_pct:.1f}%", f"보유 {len(balance.holdings)}종목, HHI {hhi:.2f}")
 
-    st.markdown(f"→ **{investment_style_signal(activity, hhi, data_reliable=not pension)}**")
-    if pension:
-        st.caption(
-            "⚠️ 퇴직연금(DC형) 계좌는 KIS Open API의 체결내역 조회 API(일반/퇴직연금/실현손익 전부)가 "
-            "'조회할 내용이 없음'만 반환해, 실제 매매가 있었어도 위 매매 건수는 항상 0으로 나옵니다 — "
-            "이 계좌 유형의 API 한계이며, 보유 종목·평가금액은 정상적으로 반영됩니다."
-        )
-
+    st.markdown(f"→ **{investment_style_signal(activity, hhi, data_reliable=True)}**")
     st.caption(
         "예수금(D/D+1/D+2)은 위 '보유 종목' 섹션에 계좌 유형에 맞는 API로 표시됩니다 "
         "(퇴직연금은 전용 예수금조회 API, 일반 계좌는 잔고조회 API의 D/D+1/D+2 필드) — "
@@ -653,6 +673,143 @@ def render_overseas(cfg: KisConfig):
             width="stretch",
             hide_index=True,
             key=f"overseas_execs_{cfg.account_no}",
+        )
+
+
+def render_kis_executions(cfg: KisConfig):
+    """"📒 체결 내역 (전체)" 섹션 — `get_full_executions`로 모은 이 계좌의 체결 이력
+    전체(최대 15년)를 표로 보여준다. DC 퇴직연금 계좌도 이 API로는 조회된다."""
+    st.subheader("📒 체결 내역 (전체)")
+    try:
+        records = _full_executions(cfg)
+    except Exception as e:
+        st.warning(f"체결 이력 조회 실패 ({cfg.display_label}): {e}")
+        return
+    if not records:
+        st.info("조회된 체결 이력이 없습니다.")
+        return
+    buys = sum(r.amount for r in records if r.side == "매수")
+    sells = sum(r.amount for r in records if r.side == "매도")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("체결 건수", f"{len(records)}건", f"{records[-1].date} ~ {records[0].date}")
+    c2.metric("누적 매수금액", f"{buys:,.0f}")
+    c3.metric("누적 매도금액", f"{sells:,.0f}")
+    st.dataframe(
+        [
+            {
+                "일자": r.date,
+                "시각": r.time,
+                "구분": r.side,
+                "주문유형": r.order_type,
+                "종목명": r.stock_name,
+                "종목코드": r.stock_code,
+                "수량": r.quantity,
+                "체결단가": r.price,
+                "체결금액": r.amount,
+            }
+            for r in records
+        ],
+        width="stretch",
+        hide_index=True,
+        key=f"kis_executions_{cfg.account_no}",
+    )
+
+
+def render_kiwoom_account(cfg: KiwoomConfig):
+    """키움증권 계좌 1개: 현재 상태(보유종목/합계/예수금) + 전체 거래내역.
+
+    거래내역은 위탁종합거래내역(kt00015)이라 매매뿐 아니라 배당(수익분배금)·
+    이자·이체 입금도 포함한다. 매매만 따로 위에 보여주고 전체 원장은 접어 둔다.
+    """
+    st.subheader("보유 종목")
+    try:
+        bal = _kiwoom_balance(cfg)
+    except Exception as e:
+        st.error(f"키움 계좌 조회 실패 ({cfg.display_label}): {e}")
+        return
+    if bal.holdings:
+        st.dataframe(
+            [
+                {
+                    "종목명": h.name,
+                    "종목코드": h.code,
+                    "수량": h.quantity,
+                    "매입가": h.avg_price,
+                    "현재가": h.current_price,
+                    "평가금액": h.eval_amount,
+                    "평가손익": h.eval_profit_loss,
+                    "손익률(%)": h.profit_rate,
+                    "비중(%)": h.weight,
+                }
+                for h in bal.holdings
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"kiwoom_holdings_{cfg.app_key[:8]}",
+        )
+    else:
+        st.info("보유 중인 종목이 없습니다.")
+    s = bal.summary
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("추정예탁자산", f"{s.estimated_asset:,.0f}")
+    c2.metric("평가손익", f"{s.eval_profit_loss:,.0f}", f"{s.profit_rate:.2f}%")
+    c3.metric("매입금액", f"{s.purchase_amount:,.0f}")
+    c4.metric("예수금", f"{s.deposit:,.0f}")
+    st.caption(f"주문가능 {s.orderable:,.0f}원 · 출금가능 {s.withdrawable:,.0f}원")
+
+    st.subheader("📒 거래 내역")
+    try:
+        history = _kiwoom_history(cfg)
+    except Exception as e:
+        st.warning(f"키움 거래내역 조회 실패: {e}")
+        return
+    if not history:
+        st.info("조회된 거래내역이 없습니다.")
+        return
+    trades = [r for r in history if r.is_trade]
+    st.markdown(f"**매매 내역** ({len(trades)}건)")
+    if trades:
+        st.dataframe(
+            [
+                {
+                    "일자": r.date,
+                    "구분": r.memo,
+                    "종목명": r.name,
+                    "종목코드": r.code,
+                    "수량": r.quantity,
+                    "단가": r.unit_price,
+                    "거래금액": r.amount,
+                    "수수료": r.commission,
+                    "예수금잔고": r.balance,
+                }
+                for r in trades
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"kiwoom_trades_{cfg.app_key[:8]}",
+        )
+    else:
+        st.info("매매 내역이 없습니다.")
+    with st.expander(f"전체 거래 원장 (입출금·배당 포함, {len(history)}건, {history[-1].date} ~ {history[0].date})"):
+        st.dataframe(
+            [
+                {
+                    "일자": r.date,
+                    "시각": r.time,
+                    "종류": r.kind,
+                    "적요": r.memo,
+                    "종목명": r.name,
+                    "수량": r.quantity,
+                    "단가": r.unit_price,
+                    "거래금액": r.amount,
+                    "정산금액": r.settle_amount,
+                    "예수금잔고": r.balance,
+                }
+                for r in history
+            ],
+            width="stretch",
+            hide_index=True,
+            key=f"kiwoom_ledger_{cfg.app_key[:8]}",
         )
 
 
@@ -943,6 +1100,7 @@ def render_account_section(cfg: KisConfig):
     balance = render_holdings(cfg)
     if balance is None:
         return None
+    render_kis_executions(cfg)
     render_overseas(cfg)
     render_investment_style(cfg, balance)
     render_manual_transactions(cfg)
@@ -988,17 +1146,24 @@ def main():
     render_market_overview(primary_cfg)
 
     all_holdings = []
-    if len(configs) == 1:
+    kiwoom_configs = load_kiwoom_configs()
+    if len(configs) == 1 and not kiwoom_configs:
         balance = render_account_section(configs[0])
         if balance is not None:
             all_holdings.extend(balance.holdings)
     else:
-        tabs = st.tabs([c.display_label for c in configs])
+        labels = [c.display_label for c in configs] + [
+            f"키움 {c.display_label}" for c in kiwoom_configs
+        ]
+        tabs = st.tabs(labels)
         for tab, cfg in zip(tabs, configs):
             with tab:
                 balance = render_account_section(cfg)
                 if balance is not None:
                     all_holdings.extend(balance.holdings)
+        for tab, kcfg in zip(tabs[len(configs):], kiwoom_configs):
+            with tab:
+                render_kiwoom_account(kcfg)
 
     watchlist = render_watchlist()
 

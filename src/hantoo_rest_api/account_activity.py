@@ -278,6 +278,110 @@ def get_recent_executions(
 
 
 @dataclass(frozen=True)
+class ExecutionRecord:
+    """`get_full_executions`가 돌려주는 체결 1건 (주문 단위, 체결수량 > 0만)."""
+
+    date: dt.date
+    time: str  # HH:MM:SS (ord_tmd)
+    order_no: str
+    side: str  # "매수" / "매도" (정정 주문이어도 방향 기준)
+    order_type: str  # 현금매수/매도정정* 등 원문 (sll_buy_dvsn_cd_name)
+    stock_code: str
+    stock_name: str
+    quantity: int
+    price: float  # 체결평균가 (avg_prvs)
+    amount: float
+
+
+def get_full_executions(
+    cfg: KisConfig, access_token: str, *, years: int = 15
+) -> list[ExecutionRecord]:
+    """계좌의 체결 이력을 최대한 길게(`years`년) 모아 최신순으로 반환한다.
+
+    `inquire-daily-ccld`를 tr_id `CTSC9215R`(3개월 이전 조회용)로 호출한다. 실측으로
+    이 tr_id는 최근 일자도 포함해 조회되고, **일반 체결내역 tr_id(TTTC0081R)가
+    "퇴직연금계좌는 해당 서비스가 불가합니다"로 거절하는 DC 계좌에서도 체결 이력을
+    돌려줬다**(README의 "DC는 이력 복원 불가" 결론을 수정해야 하는 발견). 조회기간이
+    1년 이내로 제한되어 364일 창을 `years`번 거슬러 올라가며, 창마다
+    `tr_cont`/`ctx_area_*`로 연속조회한다. 금현물/CMA 계좌는 이 API도 거절한다.
+
+    Raises:
+        RuntimeError: 첫 창에서 업무 오류가 난 경우(이후 창의 오류는 이력의 끝으로 보고 멈춘다).
+    """
+    if cfg.is_virtual:
+        tr_id = "VTSC9215R"
+    else:
+        tr_id = "CTSC9215R"
+    end = dt.date.today()
+    records: list[ExecutionRecord] = []
+    seen: set[tuple] = set()
+    for window in range(years):
+        start = end - dt.timedelta(days=363)
+        fk = nk = ""
+        for _ in range(30):
+            params = {
+                "CANO": cfg.account_no,
+                "ACNT_PRDT_CD": cfg.account_product_cd,
+                "INQR_STRT_DT": start.strftime("%Y%m%d"),
+                "INQR_END_DT": end.strftime("%Y%m%d"),
+                "SLL_BUY_DVSN_CD": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "01",
+                "INQR_DVSN": "00",
+                "INQR_DVSN_3": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": fk,
+                "CTX_AREA_NK100": nk,
+                "EXCG_ID_DVSN_CD": "KRX",
+            }
+            headers = _headers(cfg, access_token, tr_id)
+            if nk.strip():
+                headers["tr_cont"] = "N"
+            resp = requests.get(
+                f"{cfg.base_url}{_DAILY_CCLD_PATH}", headers=headers, params=params, timeout=15
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("rt_cd") != "0":
+                if window == 0:
+                    raise RuntimeError(
+                        f"체결 이력 조회 실패: {data.get('msg_cd')} {data.get('msg1')}"
+                    )
+                return sorted(records, key=lambda r: (r.date, r.time), reverse=True)
+            for item in data.get("output1") or []:
+                qty = int(item.get("tot_ccld_qty") or 0)
+                if qty <= 0:
+                    continue
+                key = (item.get("ord_dt"), item.get("odno"), item.get("pdno"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                tmd = item.get("ord_tmd", "") or ""
+                records.append(
+                    ExecutionRecord(
+                        date=dt.datetime.strptime(item["ord_dt"], "%Y%m%d").date(),
+                        time=f"{tmd[0:2]}:{tmd[2:4]}:{tmd[4:6]}" if len(tmd) >= 6 else tmd,
+                        order_no=item.get("odno", ""),
+                        side="매도" if item.get("sll_buy_dvsn_cd") == "01" else "매수",
+                        order_type=item.get("sll_buy_dvsn_cd_name", ""),
+                        stock_code=item.get("pdno", ""),
+                        stock_name=item.get("prdt_name", ""),
+                        quantity=qty,
+                        price=float(item.get("avg_prvs") or 0),
+                        amount=float(item.get("tot_ccld_amt") or 0),
+                    )
+                )
+            if resp.headers.get("tr_cont") not in ("M", "F"):
+                break
+            fk, nk = data.get("ctx_area_fk100", ""), data.get("ctx_area_nk100", "")
+            time.sleep(0.2)
+        end = start - dt.timedelta(days=1)
+    return sorted(records, key=lambda r: (r.date, r.time), reverse=True)
+
+
+@dataclass(frozen=True)
 class TradingActivitySummary:
     """기간 내 매매 활동 요약. `investment_style_signal`의 입력으로 쓰인다."""
 
