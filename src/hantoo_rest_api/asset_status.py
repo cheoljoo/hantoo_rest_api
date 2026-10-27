@@ -104,3 +104,26 @@ def get_asset_status(cfg: KisConfig, access_token: str) -> AssetStatus:
         cma_eval_amount=f(o2, "cma_evlu_amt"),
         total_asset=f(o2, "tot_asst_amt"),
     )
+
+
+_PRICE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-price"
+GOLD_1KG_CODE = "M04020000"  # KRX 금 99.99_1kg (원/g)
+
+
+def get_gold_price(cfg: KisConfig, access_token: str) -> float:
+    """KRX 금시장 금 99.99_1kg 현재가(원/g). 금현물 보유 수량 추정에 쓴다.
+
+    잔고 API가 없어 수량은 `평가금액 / 현재가`로 추정할 수밖에 없다 (평가 시점이
+    달라 수 g 단위 오차가 있을 수 있으므로 반올림해서 쓴다).
+    """
+    resp = requests.get(
+        f"{cfg.base_url}{_PRICE_PATH}",
+        headers=_headers(cfg, access_token, "FHKST01010100"),
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": GOLD_1KG_CODE},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"금 시세 조회 실패: {data.get('msg_cd')} {data.get('msg1')}")
+    return float(data["output"]["stck_prpr"])

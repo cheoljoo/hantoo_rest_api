@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 hantoo-rest-api = "hantoo_rest_api:main"
+hantoo-snapshot = "hantoo_rest_api.snapshot:main"
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]

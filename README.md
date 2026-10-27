@@ -218,3 +218,10 @@ uv run streamlit run app.py
   높아질 것이다.
 
 License: Apache License 2.0
+
+## 예수금 스냅샷 (입출금/배당 추정)
+
+한투 Open API에는 입출금·배당·이자 내역 API가 없어서, 매일 23:50 cron(`uv run hantoo-snapshot`)이
+계좌별 현금을 `deposit_snapshots.csv`(git 제외)에 기록한다. 연속한 두 스냅샷의 현금 변화에서 그 구간의
+체결 순액(매도-매수)을 뺀 값이 입출금·배당·이자 추정이며 웹의 각 계좌 탭에 표시된다
+(`deposit_snapshots.py`). 기록을 시작한 날 이전의 입출금은 알 수 없다.

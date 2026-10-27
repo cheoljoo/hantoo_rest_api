@@ -35,7 +35,8 @@ from hantoo_rest_api.global_indices import (
     peripheral_negative_count,
     peripheral_signal,
 )
-from hantoo_rest_api.asset_status import get_asset_status
+from hantoo_rest_api.asset_status import get_asset_status, get_gold_price
+from hantoo_rest_api.deposit_snapshots import infer_cash_flows, load_snapshots
 from hantoo_rest_api.kiwoom import (
     KiwoomConfig,
     get_kiwoom_balance,
@@ -270,6 +271,12 @@ def _pension_deposit(cfg: KisConfig):
 
 
 @st.cache_data(ttl=60)
+def _gold_price(cfg: KisConfig) -> float:
+    """금 99.99_1kg 현재가(원/g) 캐시."""
+    return get_gold_price(cfg, _access_token(cfg))
+
+
+@st.cache_data(ttl=60)
 def _asset_status(cfg: KisConfig):
     """`get_asset_status`(자산군별 현황) 캐시. 금현물/CMA처럼 일반 잔고조회가
     안 되는 계좌의 대체 조회용. 60초 TTL."""
@@ -470,6 +477,20 @@ def render_holdings(cfg: KisConfig):
         c1.metric("총자산", f"{status.total_asset:,.0f}")
         c2.metric("평가손익", f"{status.eval_profit_loss:,.0f}")
         c3.metric("예수금", f"{status.deposit:,.0f}")
+        gold = next((c for c in status.categories if c.name == "금현물"), None)
+        if gold and gold.eval_amount > 0:
+            try:
+                price = _gold_price(cfg)
+                grams = round(gold.eval_amount / price)
+                st.markdown("**🥇 금현물 (추정)**")
+                g1, g2, g3, g4 = st.columns(4)
+                g1.metric("보유 수량(추정)", f"{grams:,} g")
+                g2.metric("g당 매입가", f"{gold.purchase_amount / grams:,.0f}")
+                g3.metric("현재가(원/g)", f"{price:,.0f}")
+                g4.metric("손익률", f"{gold.eval_profit_loss / gold.purchase_amount * 100:.2f}%")
+                st.caption("수량은 평가금액 ÷ 금 99.99_1kg 현재가로 추정한 값입니다 (잔고 API 없음).")
+            except Exception as ge:
+                st.caption(f"금 시세 조회 실패: {ge}")
         if status.categories:
             st.dataframe(
                 [
@@ -590,6 +611,48 @@ def render_investment_style(cfg: KisConfig, balance):
 
 
 TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
+
+
+def render_cash_flow(cfg: KisConfig):
+    """"💵 예수금 스냅샷 · 입출금/배당 추정" 섹션. 쌓인 스냅샷 구간마다 현금 변화에서
+    체결 순액을 뺀 값을 입출금·배당·이자 추정으로 보여준다. 스냅샷은 매일 23:50 cron
+    (`hantoo-snapshot`)만 기록한다 — 웹 접속 시점(장중)에 기록하면 그 뒤 체결이 아직
+    현금에 반영되지 않은 채 같은 날 체결로 계산되어 추정이 틀어지기 때문이다."""
+    st.subheader("💵 예수금 스냅샷 · 입출금/배당 추정")
+    snaps = [x for x in load_snapshots() if x.account_no == cfg.account_no]
+    if len(snaps) < 2:
+        st.info(
+            f"스냅샷 {len(snaps)}개 — 2개 이상 쌓이면(매일 23:50 자동 기록) 구간별 입출금·배당 "
+            "추정이 표시됩니다. 기록 이전의 입출금은 알 수 없습니다."
+        )
+        return
+    try:
+        execs = _full_executions(cfg)
+    except Exception:
+        execs = None
+    flows = infer_cash_flows(snaps, execs)
+    st.dataframe(
+        [
+            {
+                "구간": f"{f.start} → {f.end}",
+                "시작 현금": f.cash_before,
+                "종료 현금": f.cash_after,
+                "현금 변화": f.change,
+                "체결 순액(매도-매수)": f.trade_net,
+                "입출금·배당·이자 추정": f.residual,
+            }
+            for f in reversed(flows)
+        ],
+        width="stretch",
+        hide_index=True,
+        key=f"cash_flow_{cfg.account_no}",
+    )
+    known = [f.residual for f in flows if f.residual is not None]
+    if known:
+        st.caption(
+            f"기록 시작({snaps[0].date}) 이후 추정 순입금 합계: {sum(known):,.0f}원. "
+            "수수료·세금은 반영하지 않아 소액 잔차가 있을 수 있고, 스냅샷을 놓친 날은 여러 날이 합쳐집니다."
+        )
 
 
 def render_overseas(cfg: KisConfig):
@@ -1099,8 +1162,10 @@ def render_account_section(cfg: KisConfig):
     """
     balance = render_holdings(cfg)
     if balance is None:
+        render_cash_flow(cfg)
         return None
     render_kis_executions(cfg)
+    render_cash_flow(cfg)
     render_overseas(cfg)
     render_investment_style(cfg, balance)
     render_manual_transactions(cfg)
