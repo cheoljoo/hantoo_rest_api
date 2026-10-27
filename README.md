@@ -229,3 +229,8 @@ License: Apache License 2.0
 ## 채권 · 펀드
 - 채권: 위탁계좌/ISA 탭에 "🧾 채권 보유 (매수 내역)"이 표시된다 (`bond.py`, 채권 잔고 API CTSC8407R). 현재 보유 중인 매수 로트만 조회되며 상환·매도분과 평가손익은 API가 주지 않는다.
 - 펀드: KIS Open API에 펀드 잔고 API가 없어 `funds.yaml`(git 제외, 형식은 `funds.yaml.example`)에 직접 적으면 해당 계좌 탭에 표시된다.
+
+## 토스증권 · 구글시트 연동
+- 토스증권: `.env`의 `TOSS_ID`/`TOSS_SECRET`(+선택 `TOSS_ACCOUNT_LABEL`)으로 Open API(`toss.py`)에서 보유 종목, 체결(주문) 내역, 매수가능 현금을 읽어 "토스증권" 탭에 표시한다. 조회(GET)만 사용하며 주문 API는 호출하지 않는다. 토스 채권/미국국채 상품은 API에 없다.
+- 구글시트: `GSHEET_ID`(+`GSHEET_NAME`, 기본 ALL)로 시트의 보유 행을 읽어 API로 안 보이는 자산(미래에셋/SBi/토스 채권/DC 보험·TDF)과 시트↔API 대조표를 "📑 구글시트 연동"에 표시한다. `GSHEET_SA_FILE`(서비스 계정 JSON 경로, 시트를 뷰어로 공유)을 채우면 비공개 시트를 읽고, 비우면 "링크 공유" 시트를 CSV로 읽는다. 읽기 전용이다.
+- 구글 OAuth: `client_secret*.json`(데스크톱 클라이언트)을 레포 루트나 `GSHEET_OAUTH_CLIENT` 경로에 두고 `uv run hantoo-gsheet-auth url` → 브라우저 승인 → `uv run hantoo-gsheet-auth code "<리다이렉트 주소>"`로 토큰 발급. 기본 권한은 읽기+쓰기이고 `--readonly`로 읽기 전용 발급.

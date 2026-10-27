@@ -233,3 +233,8 @@ fund_nav.csv
 deposit_snapshots.csv
 deposit_snapshots.csv.tmp
 snapshot.log
+
+# Google OAuth/서비스 계정 키 파일
+client_secret*.json
+*-sa.json
+sheets-sa*.json

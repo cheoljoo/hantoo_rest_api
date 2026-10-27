@@ -7,6 +7,8 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "google-auth>=2.62.0",
+    "google-auth-oauthlib>=1.5.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
@@ -16,6 +18,7 @@ dependencies = [
 [project.scripts]
 hantoo-rest-api = "hantoo_rest_api:main"
 hantoo-snapshot = "hantoo_rest_api.snapshot:main"
+hantoo-gsheet-auth = "hantoo_rest_api.gsheet_auth:main"
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]

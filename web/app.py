@@ -36,6 +36,13 @@ from hantoo_rest_api.global_indices import (
     peripheral_signal,
 )
 from hantoo_rest_api.bond import get_bond_balance
+from hantoo_rest_api.gsheet import fetch_sheet_rows
+from hantoo_rest_api.toss import (
+    get_toss_account,
+    get_toss_orders,
+    get_toss_token,
+    load_toss_config,
+)
 from hantoo_rest_api.funds import load_manual_funds
 from hantoo_rest_api.asset_status import get_asset_status, get_gold_price
 from hantoo_rest_api.deposit_snapshots import infer_cash_flows, load_snapshots
@@ -271,6 +278,23 @@ def _pension_deposit(cfg: KisConfig):
     보완한다. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
     token = _access_token(cfg)
     return get_pension_deposit(cfg, token)
+
+
+@st.cache_data(ttl=60)
+def _toss_account(cfg):
+    """토스 보유 종목·현금·환율 캐시 (새로 고침 버튼으로 갱신)."""
+    return get_toss_account(cfg, get_toss_token(cfg))
+
+
+@st.cache_data(ttl=60 * 30)
+def _toss_orders(cfg, seq: int):
+    return get_toss_orders(cfg, get_toss_token(cfg), seq)
+
+
+@st.cache_data(ttl=60 * 5)
+def _sheet_rows():
+    """구글시트 ALL 탭 보유 행 캐시 (새로 고침 버튼이 캐시를 비우면 다시 읽는다)."""
+    return fetch_sheet_rows()
 
 
 @st.cache_data(ttl=60)
@@ -907,6 +931,60 @@ def render_kis_executions(cfg: KisConfig):
     )
 
 
+def render_toss_account(cfg):
+    """토스증권 계좌 1개 — 다른 계좌 탭과 같은 구성(요약 → 보유 → 채권/펀드/해외 → 체결 → …)."""
+    try:
+        acct = _toss_account(cfg)
+    except Exception as e:
+        st.error(f"토스 계좌 조회 실패: {e}")
+        return
+    _summary_row(
+        acct.total_krw, acct.eval_krw - acct.purchase_krw, acct.purchase_krw,
+        acct.cash_krw + acct.cash_usd * acct.usd_krw, 0,
+        f"USD는 환율 {acct.usd_krw:,.1f}원으로 환산. 현금은 매수가능금액 기준 "
+        f"(원화 {acct.cash_krw:,.0f} · USD {acct.cash_usd:,.2f}). 토스 채권·미국국채 상품은 API 미제공.",
+    )
+    st.subheader("보유 종목")
+    if acct.holdings:
+        st.dataframe(
+            [
+                {"종목명": h.name, "종목코드": h.symbol, "국가": h.country, "통화": h.currency,
+                 "수량": h.quantity, "매입가": h.avg_price, "현재가": h.last_price,
+                 "평가금액": h.eval_amount, "평가손익": h.profit_loss,
+                 "손익률(%)": round(h.profit_loss_rate * 100, 2)}
+                for h in acct.holdings
+            ],
+            width="stretch", hide_index=True, key="toss_holdings",
+        )
+    else:
+        st.info("보유 중인 종목이 없습니다.")
+    _na("🧾 채권 보유 (매수 내역)", "토스 채권·미국국채는 API가 제공하지 않습니다 (아래 구글시트 연동 참고).")
+    _na("🏦 펀드 (수동 기록)", "토스는 펀드 조회를 지원하지 않습니다.")
+    st.subheader("🌏 해외주식 / 외화")
+    st.caption(f"토스는 국내·미국 주식을 한 보유 목록으로 보여줍니다. 외화(USD) 매수가능 {acct.cash_usd:,.2f} 달러.")
+    st.subheader("📒 체결 내역 (전체)")
+    try:
+        orders = [o for o in _toss_orders(cfg, acct.seq) if o.status == "FILLED"]
+    except Exception as e:
+        st.warning(f"주문 내역 조회 실패: {e}")
+        orders = []
+    if orders:
+        st.dataframe(
+            [
+                {"일시": o.ordered_at.strftime("%Y-%m-%d %H:%M"), "구분": "매수" if o.side == "BUY" else "매도",
+                 "종목": o.symbol, "수량": o.filled_quantity, "체결단가": o.avg_fill_price,
+                 "체결금액": o.filled_amount, "통화": o.currency, "수수료": o.commission, "세금": o.tax}
+                for o in sorted(orders, key=lambda o: o.ordered_at, reverse=True)
+            ],
+            width="stretch", hide_index=True, key="toss_orders",
+        )
+    else:
+        st.info("체결된 주문이 없습니다.")
+    _na("💵 예수금 스냅샷 · 입출금/배당 추정", "토스는 스냅샷 기록 대상이 아닙니다 (한투 계좌만).")
+    _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
+    _na("📝 매매 내역 (수동 기록)", "한투 계좌에서만 제공합니다.")
+
+
 def render_kiwoom_account(cfg: KiwoomConfig):
     """키움증권 계좌 1개: 현재 상태(보유종목/합계/예수금) + 전체 거래내역.
 
@@ -1149,6 +1227,111 @@ def render_candles(cfg: KisConfig, codes: list[tuple[str, str]]):
     st.plotly_chart(fig, width="stretch")
 
 
+# 시트의 통장명 → 이 앱의 한투/키움 계좌 라벨 (API로 조회되는 계좌만 대조한다)
+_SHEET_TO_API = {
+    "한투 DC": "DC 계좌",
+    "한투 ISA": "ISA",
+    "한투 현물투자전용": "금현물",
+    "한투": "위탁계좌",
+    "한투 CMA": "CMA",
+    "키움저축연금5312-8040": "키움 연금저축(Old)",
+    "키움키움저축연금5420-0864": "키움 연금저축(New)",
+}
+
+
+def render_sheet(configs: list[KisConfig], kiwoom_configs: list[KiwoomConfig], toss_cfg=None):
+    """"📑 구글시트 연동" 섹션 — API로 볼 수 없는 자산(미래에셋/SBi/토스/DC 보험·TDF)과
+    시트 ↔ API 계좌별 평가금액 대조표."""
+    st.subheader("📑 구글시트 연동 (my_finance · ALL 탭)")
+    try:
+        rows = _sheet_rows()
+    except Exception as e:
+        st.info(f"구글시트를 읽지 못했습니다: {e}")
+        return
+    api_brokers = ("한투", "키움")
+    sheet_only = [
+        r for r in rows
+        if r.broker not in api_brokers
+        or (r.account in ("한투 DC", "한투 CMA") and not r.ticker and "계좌 현금" not in r.name
+            and "CD금리" not in r.name)
+    ]
+    if toss_cfg:
+        try:
+            toss_names = {h.name for h in _toss_account(toss_cfg).holdings}
+        except Exception:
+            toss_names = set()
+        sheet_only = [r for r in sheet_only if not (r.broker == "토스" and r.name in toss_names)]
+    st.markdown("**API로 조회되지 않는 자산 (시트 기준)**")
+    st.metric("합계", f"{sum(r.eval_amount for r in sheet_only):,.0f}")
+    by_acct: dict[tuple[str, str], float] = {}
+    for r in sheet_only:
+        by_acct[(r.broker, r.account)] = by_acct.get((r.broker, r.account), 0) + r.eval_amount
+    st.dataframe(
+        [{"증권사": b, "통장": a, "평가금액": v} for (b, a), v in sorted(by_acct.items(), key=lambda x: -x[1])],
+        width="stretch", hide_index=True, key="sheet_only_accounts",
+    )
+    with st.expander(f"종목별 상세 ({len(sheet_only)}행)"):
+        st.dataframe(
+            [
+                {"증권사": r.broker, "통장": r.account, "종목": r.name, "수량": r.quantity,
+                 "매수일": r.buy_date, "매수금액": r.buy_total, "평가금액": r.eval_amount, "메모": r.note}
+                for r in sheet_only
+            ],
+            width="stretch", hide_index=True, key="sheet_only_rows",
+        )
+
+    st.markdown("**시트 ↔ API 대조 (계좌별 평가금액)**")
+    sheet_sum: dict[str, float] = {}
+    for r in rows:
+        label = _SHEET_TO_API.get(r.account)
+        if label:
+            sheet_sum[label] = sheet_sum.get(label, 0) + r.eval_amount
+    compare = []
+    for cfg in configs:
+        if cfg.display_label not in sheet_sum.keys() and cfg.display_label not in _SHEET_TO_API.values():
+            continue
+        compare.append((cfg.display_label, _kis_total(cfg)))
+    for k in kiwoom_configs:
+        compare.append((f"키움 {k.display_label}", _kiwoom_total(k)))
+    if toss_cfg:
+        try:
+            compare.append((toss_cfg.display_label, _toss_account(toss_cfg).total_krw))
+        except Exception:
+            compare.append((toss_cfg.display_label, None))
+        sheet_sum[toss_cfg.display_label] = sum(r.eval_amount for r in rows if r.broker == "토스")
+    table = []
+    for label, api in compare:
+        sv = sheet_sum.get(label)
+        table.append({"계좌": label, "시트": sv, "API": api, "차이(시트-API)": None if sv is None or api is None else sv - api})
+    st.dataframe(table, width="stretch", hide_index=True, key="sheet_compare")
+    st.caption(
+        "API 값 = 주식 평가 + 현금 + 채권 매수금액. 시트의 'DC 계좌 현금' 행이 매수 후에도 줄지 않으면 "
+        "DC 차이가 크게 나타납니다 (이중 계상)."
+    )
+
+
+def _kis_total(cfg: KisConfig):
+    try:
+        s = _account_balance(cfg).summary
+        cash = _pension_deposit(cfg).deposit_total if is_pension_account(cfg) else s.next_2day_withdrawable
+        sec = s.securities_eval_amount
+    except Exception:
+        try:
+            st_ = _asset_status(cfg)
+            sec, cash = st_.eval_amount, st_.deposit
+        except Exception:
+            return None
+    return sec + cash + sum(b.buy_amount for b in _safe_bonds(cfg))
+
+
+def _kiwoom_total(cfg: KiwoomConfig):
+    try:
+        s = _kiwoom_balance(cfg).summary
+        return s.eval_amount + s.deposit
+    except Exception:
+        return None
+
+
 def render_portfolio_rebalance(cfg: KisConfig):
     """"🎯 목표 포트폴리오 리밸런싱" 섹션.
 
@@ -1357,14 +1540,15 @@ def main():
 
     all_holdings = []
     kiwoom_configs = load_kiwoom_configs()
-    if len(configs) == 1 and not kiwoom_configs:
+    toss_cfg = load_toss_config()
+    if len(configs) == 1 and not kiwoom_configs and not toss_cfg:
         balance = render_account_section(configs[0])
         if balance is not None:
             all_holdings.extend(balance.holdings)
     else:
         labels = [c.display_label for c in configs] + [
             f"키움 {c.display_label}" for c in kiwoom_configs
-        ]
+        ] + ([toss_cfg.display_label] if toss_cfg else [])
         tabs = st.tabs(labels)
         for tab, cfg in zip(tabs, configs):
             with tab:
@@ -1377,6 +1561,11 @@ def main():
                 _na("💵 예수금 스냅샷 · 입출금/배당 추정", "키움은 위 '전체 거래 원장'에 입출금·배당·이자와 예수금잔고가 직접 나옵니다.")
                 _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
                 _na("📝 매매 내역 (수동 기록)", "한투 계좌에서만 제공합니다 (키움은 API로 전체 거래가 조회됨).")
+        if toss_cfg:
+            with tabs[len(configs) + len(kiwoom_configs)]:
+                render_toss_account(toss_cfg)
+
+    render_sheet(configs, kiwoom_configs, toss_cfg)
 
     watchlist = render_watchlist()
 
