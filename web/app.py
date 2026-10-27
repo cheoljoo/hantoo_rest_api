@@ -35,6 +35,8 @@ from hantoo_rest_api.global_indices import (
     peripheral_negative_count,
     peripheral_signal,
 )
+from hantoo_rest_api.bond import get_bond_balance
+from hantoo_rest_api.funds import load_manual_funds
 from hantoo_rest_api.asset_status import get_asset_status, get_gold_price
 from hantoo_rest_api.deposit_snapshots import infer_cash_flows, load_snapshots
 from hantoo_rest_api.kiwoom import (
@@ -72,6 +74,7 @@ from hantoo_rest_api.price import get_daily_candles
 from hantoo_rest_api.watchlist import load_watchlist
 
 import datetime as dt
+from types import SimpleNamespace
 
 SECRETS_PATH = Path(__file__).parent / ".streamlit" / "secrets.toml"
 DEFAULT_PASSWORD = "2222"
@@ -268,6 +271,12 @@ def _pension_deposit(cfg: KisConfig):
     보완한다. 예수금은 실시간성이 중요해 60초로 짧게 캐시."""
     token = _access_token(cfg)
     return get_pension_deposit(cfg, token)
+
+
+@st.cache_data(ttl=60)
+def _bond_balance(cfg: KisConfig):
+    """`get_bond_balance`(채권 매수 로트별 잔고) 캐시. 60초 TTL."""
+    return get_bond_balance(cfg, _access_token(cfg))
 
 
 @st.cache_data(ttl=60)
@@ -574,6 +583,48 @@ def render_holdings(cfg: KisConfig):
     return balance
 
 
+def _na(title: str, msg: str):
+    """계좌 유형상 지원하지 않는 섹션도 헤더는 항상 그려 모든 계좌의 화면 구성을 같게 한다."""
+    st.subheader(title)
+    st.caption(msg)
+
+
+def _summary_row(total, pl, purchase, cash, bond, note: str = ""):
+    """모든 계좌 탭 맨 위에 같은 모양으로 그리는 5개 요약 지표."""
+    st.subheader("📊 계좌 요약")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("총평가 (주식+현금)", f"{total:,.0f}")
+    c2.metric("평가손익", f"{pl:,.0f}")
+    c3.metric("매입금액", f"{purchase:,.0f}")
+    c4.metric("예수금·현금", f"{cash:,.0f}")
+    c5.metric("채권 (매수금액)", f"{bond:,.0f}")
+    st.caption("총평가에는 채권·펀드·해외주식이 포함되지 않습니다." + (f" {note}" if note else ""))
+
+
+def render_summary(cfg: KisConfig):
+    """한투 계좌 요약 — 일반/DC/금현물·CMA 모두 같은 5개 지표로 정규화한다."""
+    bond = sum(b.buy_amount for b in _safe_bonds(cfg))
+    try:
+        bal = _account_balance(cfg)
+        s = bal.summary
+        if is_pension_account(cfg):
+            cash = _pension_deposit(cfg).deposit_total
+            total = s.securities_eval_amount + cash
+        else:
+            cash = s.next_2day_withdrawable
+            total = s.total_eval_amount
+        _summary_row(total, s.total_eval_profit_loss, s.total_purchase_amount, cash, bond)
+        return
+    except Exception:
+        pass
+    try:
+        st_ = _asset_status(cfg)
+        _summary_row(st_.total_asset, st_.eval_profit_loss, st_.purchase_amount, st_.deposit, bond,
+                     "종목별 잔고 API 미지원 계좌라 자산현황 API 값입니다.")
+    except Exception as e:
+        _na("📊 계좌 요약", f"조회 실패: {e}")
+
+
 def render_investment_style(cfg: KisConfig, balance):
     """"🧭 내 투자 스타일 진단" + "💰 예수금 현황" 섹션을 렌더링한다.
 
@@ -613,6 +664,77 @@ def render_investment_style(cfg: KisConfig, balance):
 TRANSACTIONS_PATH = Path(__file__).parent.parent / "transactions.yaml"
 
 
+def _safe_bonds(cfg: KisConfig):
+    """채권 잔고 조회. 금현물/CMA/DC처럼 지원하지 않는 계좌는 빈 목록."""
+    try:
+        return _bond_balance(cfg)
+    except Exception:
+        return []
+
+
+def render_bonds(cfg: KisConfig):
+    """"🧾 채권 보유 (매수 내역)" 섹션 — 채권 잔고 API가 주는 매수 로트별 표.
+    국내주식 잔고조회에는 채권이 잡히지 않으므로 별도 합계를 보여준다."""
+    st.subheader("🧾 채권 보유 (매수 내역)")
+    bonds = _safe_bonds(cfg)
+    if not bonds:
+        st.caption("보유 중인 채권이 없거나 이 계좌 유형은 채권 조회를 지원하지 않습니다.")
+        return
+    total = sum(b.buy_amount for b in bonds)
+    st.metric("채권 매수금액 합계", f"{total:,.0f}")
+    st.dataframe(
+        [
+            {
+                "종목명": b.name,
+                "종목코드": b.code,
+                "매수일": b.buy_date,
+                "순번": b.lot,
+                "수량": b.quantity,
+                "매수단가(액면1만원당)": b.buy_price,
+                "매수수익률(%)": b.buy_yield,
+                "매수금액": b.buy_amount,
+                "만기": b.maturity,
+            }
+            for b in sorted(bonds, key=lambda b: (b.buy_date, b.lot), reverse=True)
+        ],
+        width="stretch",
+        hide_index=True,
+        key=f"bonds_{cfg.account_no}",
+    )
+    st.caption(
+        "현재 보유 중인 채권의 매수 로트만 조회됩니다 (상환·매도한 채권, 평가손익/현재가는 API 미제공). "
+        "위 보유 종목 합계에는 채권이 포함되지 않습니다."
+    )
+
+
+def render_funds(cfg: KisConfig):
+    """"🏦 펀드 (수동 기록)" 섹션 — KIS API가 펀드를 제공하지 않아 `funds.yaml` 기록을 보여준다."""
+    st.subheader("🏦 펀드 (수동 기록)")
+    funds = [f for f in load_manual_funds() if f.account_no == cfg.account_no]
+    if not funds:
+        st.caption("KIS API는 펀드를 제공하지 않습니다. funds.yaml에 적으면 여기에 표시됩니다.")
+        return
+    st.metric("펀드 평가금액 합계", f"{sum(f.eval_amount for f in funds):,.0f}")
+    st.dataframe(
+        [
+            {
+                "펀드": f.name,
+                "매입금액": f.purchase_amount,
+                "평가금액": f.eval_amount,
+                "평가손익": f.profit_loss,
+                "손익률(%)": round(f.profit_loss_rate, 2),
+                "기준일": f.as_of,
+                "비고": f.note,
+            }
+            for f in funds
+        ],
+        width="stretch",
+        hide_index=True,
+        key=f"funds_{cfg.account_no}",
+    )
+    st.caption("KIS Open API는 펀드 잔고를 제공하지 않아 funds.yaml에 직접 적은 값입니다.")
+
+
 def render_cash_flow(cfg: KisConfig):
     """"💵 예수금 스냅샷 · 입출금/배당 추정" 섹션. 쌓인 스냅샷 구간마다 현금 변화에서
     체결 순액을 뺀 값을 입출금·배당·이자 추정으로 보여준다. 스냅샷은 매일 23:50 cron
@@ -630,6 +752,12 @@ def render_cash_flow(cfg: KisConfig):
         execs = _full_executions(cfg)
     except Exception:
         execs = None
+    if execs is not None:
+        # 채권 매수는 체결내역 API에 없어 보유 로트의 매수일·금액을 매수로 합쳐 추정 오차를 줄인다.
+        execs = list(execs) + [
+            SimpleNamespace(date=b.buy_date, side="매수", amount=b.buy_amount)
+            for b in _safe_bonds(cfg)
+        ]
     flows = infer_cash_flows(snaps, execs)
     st.dataframe(
         [
@@ -661,9 +789,10 @@ def render_overseas(cfg: KisConfig):
     퇴직연금 계좌는 해외주식 API 대상이 아니라 호출하지 않고, 조회 실패는
     다른 섹션에 영향이 없도록 경고로만 표시한다.
     """
-    if is_pension_account(cfg):
-        return
     st.subheader("🌏 해외주식 / 외화")
+    if is_pension_account(cfg):
+        st.caption("퇴직연금 계좌는 해외주식 조회 대상이 아닙니다.")
+        return
     try:
         ob = _overseas_balance(cfg)
     except Exception as e:
@@ -784,12 +913,15 @@ def render_kiwoom_account(cfg: KiwoomConfig):
     거래내역은 위탁종합거래내역(kt00015)이라 매매뿐 아니라 배당(수익분배금)·
     이자·이체 입금도 포함한다. 매매만 따로 위에 보여주고 전체 원장은 접어 둔다.
     """
-    st.subheader("보유 종목")
     try:
         bal = _kiwoom_balance(cfg)
     except Exception as e:
         st.error(f"키움 계좌 조회 실패 ({cfg.display_label}): {e}")
         return
+    s = bal.summary
+    _summary_row(s.estimated_asset, s.eval_profit_loss, s.purchase_amount, s.deposit, 0,
+                 f"주문가능 {s.orderable:,.0f}원 · 출금가능 {s.withdrawable:,.0f}원")
+    st.subheader("보유 종목")
     if bal.holdings:
         st.dataframe(
             [
@@ -812,15 +944,11 @@ def render_kiwoom_account(cfg: KiwoomConfig):
         )
     else:
         st.info("보유 중인 종목이 없습니다.")
-    s = bal.summary
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("추정예탁자산", f"{s.estimated_asset:,.0f}")
-    c2.metric("평가손익", f"{s.eval_profit_loss:,.0f}", f"{s.profit_rate:.2f}%")
-    c3.metric("매입금액", f"{s.purchase_amount:,.0f}")
-    c4.metric("예수금", f"{s.deposit:,.0f}")
-    st.caption(f"주문가능 {s.orderable:,.0f}원 · 출금가능 {s.withdrawable:,.0f}원")
+    _na("🧾 채권 보유 (매수 내역)", "키움 계좌는 채권 조회를 지원하지 않습니다.")
+    _na("🏦 펀드 (수동 기록)", "키움 계좌는 펀드 조회를 지원하지 않습니다.")
+    _na("🌏 해외주식 / 외화", "키움 계좌는 국내 REST API만 연동되어 있습니다.")
 
-    st.subheader("📒 거래 내역")
+    st.subheader("📒 체결 내역 (전체)")
     try:
         history = _kiwoom_history(cfg)
     except Exception as e:
@@ -1160,14 +1288,20 @@ def render_account_section(cfg: KisConfig):
     묶어서 렌더링하고, 캔들차트 종목 선택지 구성에 쓸 `AccountBalance`를
     반환한다 (계좌 조회 자체가 실패했으면 None — 이후 두 섹션은 건너뛴다).
     """
+    render_summary(cfg)
     balance = render_holdings(cfg)
-    if balance is None:
-        render_cash_flow(cfg)
-        return None
-    render_kis_executions(cfg)
-    render_cash_flow(cfg)
+    render_bonds(cfg)
+    render_funds(cfg)
     render_overseas(cfg)
-    render_investment_style(cfg, balance)
+    if balance is None:
+        _na("📒 체결 내역 (전체)", "이 계좌 유형은 체결 이력 조회를 지원하지 않습니다.")
+    else:
+        render_kis_executions(cfg)
+    render_cash_flow(cfg)
+    if balance is None:
+        _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "종목별 잔고가 없는 계좌라 진단할 수 없습니다.")
+    else:
+        render_investment_style(cfg, balance)
     render_manual_transactions(cfg)
     return balance
 
@@ -1197,10 +1331,21 @@ def main():
     if not st.session_state.get("_fresh_loaded"):
         st.cache_data.clear()
         st.session_state["_fresh_loaded"] = True
+        st.session_state["_refreshed_at"] = dt.datetime.now()
 
     now = dt.datetime.now()
     st.title("한국투자증권 계좌 대시보드")
-    st.caption(f"기준일 {now.date()} · 생성 {now.strftime('%Y-%m-%dT%H:%M:%S')}")
+    # 새로 고침 버튼: 모든 데이터 캐시를 비우면 이 실행 안에서 표·차트가 전부 새 값으로
+    # 다시 그려진다 (클릭 = 스크립트 리런이므로 아래 렌더링보다 먼저 처리해야 한다).
+    btn_col, info_col = st.columns([1, 5])
+    if btn_col.button("🔄 새로 고침", help="증권사에서 계좌·체결 데이터를 다시 받아 화면을 갱신합니다"):
+        st.cache_data.clear()
+        st.session_state["_refreshed_at"] = dt.datetime.now()
+    refreshed = st.session_state.get("_refreshed_at", now)
+    info_col.caption(
+        f"기준일 {now.date()} · 데이터 갱신 {refreshed.strftime('%Y-%m-%d %H:%M:%S')} "
+        "(버튼을 누르면 한투·키움에서 전부 다시 조회)"
+    )
     st.caption(
         f"Owner: {OWNER_NAME} <{OWNER_EMAIL}> · [GitHub ↗]({GITHUB_URL})"
     )
@@ -1229,6 +1374,9 @@ def main():
         for tab, kcfg in zip(tabs[len(configs):], kiwoom_configs):
             with tab:
                 render_kiwoom_account(kcfg)
+                _na("💵 예수금 스냅샷 · 입출금/배당 추정", "키움은 위 '전체 거래 원장'에 입출금·배당·이자와 예수금잔고가 직접 나옵니다.")
+                _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
+                _na("📝 매매 내역 (수동 기록)", "한투 계좌에서만 제공합니다 (키움은 API로 전체 거래가 조회됨).")
 
     watchlist = render_watchlist()
 

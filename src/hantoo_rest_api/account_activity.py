@@ -17,6 +17,8 @@
   (`TTTC8494R`)와 체결기준잔고(`TTTC2202R`)까지 테스트해봤지만 전부 "현재 잔고
   스냅샷"만 주거나 "조회할 내용이 없습니다"만 반환했다. 즉 **DC형 계좌는 KIS
   Open API로 과거 매매 이력을 복원할 방법이 없는 것으로 결론 내렸다.**
+  **[정정]** 이후 `get_full_executions`(CTSC9215R, EXCG_ID_DVSN_CD="ALL")로 DC 체결 이력도
+  조회됨을 확인했다. 위 결론은 이 전용 API들에 한정된 것이다.
   (`docs/bear_market_signals_kim_hyojin.md`과 별개로, 이 결론 자체가 이 프로젝트의
   중요한 트러블슈팅 기록이다.)
 - 이 한계 때문에 `investment_style_signal`은 `data_reliable=False`일 때 "매매

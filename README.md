@@ -225,3 +225,7 @@ License: Apache License 2.0
 계좌별 현금을 `deposit_snapshots.csv`(git 제외)에 기록한다. 연속한 두 스냅샷의 현금 변화에서 그 구간의
 체결 순액(매도-매수)을 뺀 값이 입출금·배당·이자 추정이며 웹의 각 계좌 탭에 표시된다
 (`deposit_snapshots.py`). 기록을 시작한 날 이전의 입출금은 알 수 없다.
+
+## 채권 · 펀드
+- 채권: 위탁계좌/ISA 탭에 "🧾 채권 보유 (매수 내역)"이 표시된다 (`bond.py`, 채권 잔고 API CTSC8407R). 현재 보유 중인 매수 로트만 조회되며 상환·매도분과 평가손익은 API가 주지 않는다.
+- 펀드: KIS Open API에 펀드 잔고 API가 없어 `funds.yaml`(git 제외, 형식은 `funds.yaml.example`)에 직접 적으면 해당 계좌 탭에 표시된다.

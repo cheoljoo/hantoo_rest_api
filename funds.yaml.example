@@ -1,0 +1,7 @@
+funds:
+  - account_no: "12345678"   # 해당 계좌 탭에만 표시 (DC 계좌번호)
+    name: "예시 TDF2050 펀드"
+    purchase_amount: 1000000  # 매입금액(원)
+    eval_amount: 1050000      # 평가금액(원) — 증권사 앱에서 보고 가끔 갱신
+    as_of: "2026-10-27"
+    note: "KIS API로 조회 불가해 수동 기록"
