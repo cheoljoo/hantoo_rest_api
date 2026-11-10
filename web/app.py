@@ -14,6 +14,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))  # daily_view, ui_style (AppTest/직접 실행에서도 import되게)
+
 import extra_streamlit_components as stx
 import plotly.graph_objects as go
 import streamlit as st
@@ -44,6 +46,18 @@ from hantoo_rest_api.toss import (
     load_toss_config,
 )
 from hantoo_rest_api.funds import load_manual_funds
+import importlib
+
+import ui_style
+
+# 서버 프로세스가 오래 떠 있으면 web/ 아래 보조 모듈이 예전 버전으로 import 캐시된 채 남는다 — 스크립트가 실행될 때마다 다시 읽는다.
+importlib.reload(ui_style)
+import daily_view  # noqa: E402  (ui_style을 먼저 새로 읽은 뒤)
+
+importlib.reload(daily_view)
+from daily_view import render_daily_report  # noqa: E402
+from ui_style import inject_tab_css, pct_delta, styled_pl, tab_marker  # noqa: E402
+from hantoo_rest_api.manual_ledger import aggregate, load_ledger
 from hantoo_rest_api.asset_status import get_asset_status, get_gold_price
 from hantoo_rest_api.deposit_snapshots import infer_cash_flows, load_snapshots
 from hantoo_rest_api.kiwoom import (
@@ -64,18 +78,6 @@ from hantoo_rest_api.market import (
     get_index_snapshots,
     get_net_flow_ranking,
     get_overseas_index_snapshots,
-)
-from hantoo_rest_api.portfolio_rebalance import (
-    CONTRIBUTION_PER_ROUND,
-    EXISTING_CASH_PARK,
-    TARGET_ASSETS,
-    PurchaseRecord,
-    append_purchase,
-    build_positions,
-    compute_rebalance_plan,
-    load_fund_nav,
-    load_purchases,
-    save_fund_nav,
 )
 from hantoo_rest_api.price import get_daily_candles
 from hantoo_rest_api.watchlist import load_watchlist
@@ -450,7 +452,7 @@ def render_market_overview(cfg: KisConfig):
         if not flows:
             st.info("조회된 데이터가 없습니다.")
         else:
-            st.dataframe(
+            _df(
                 [
                     {
                         "종목명": f.name,
@@ -507,9 +509,9 @@ def render_holdings(cfg: KisConfig):
             f"이 계좌 유형은 종목별 잔고조회가 불가({e})하여 자산군별 현황만 표시합니다."
         )
         c1, c2, c3 = st.columns(3)
-        c1.metric("총자산", f"{status.total_asset:,.0f}")
-        c2.metric("평가손익", f"{status.eval_profit_loss:,.0f}")
-        c3.metric("예수금", f"{status.deposit:,.0f}")
+        c1.metric("총자산", f"{status.total_asset:,.0f}원")
+        c2.metric("평가손익", f"{status.eval_profit_loss:,.0f}원", pct_delta(status.eval_profit_loss, status.purchase_amount))
+        c3.metric("예수금", f"{status.deposit:,.0f}원")
         gold = next((c for c in status.categories if c.name == "금현물"), None)
         if gold and gold.eval_amount > 0:
             try:
@@ -518,14 +520,14 @@ def render_holdings(cfg: KisConfig):
                 st.markdown("**🥇 금현물 (추정)**")
                 g1, g2, g3, g4 = st.columns(4)
                 g1.metric("보유 수량(추정)", f"{grams:,} g")
-                g2.metric("g당 매입가", f"{gold.purchase_amount / grams:,.0f}")
-                g3.metric("현재가(원/g)", f"{price:,.0f}")
+                g2.metric("g당 매입가", f"{gold.purchase_amount / grams:,.0f}원")
+                g3.metric("현재가(원/g)", f"{price:,.0f}원")
                 g4.metric("손익률", f"{gold.eval_profit_loss / gold.purchase_amount * 100:.2f}%")
                 st.caption("수량은 평가금액 ÷ 금 99.99_1kg 현재가로 추정한 값입니다 (잔고 API 없음).")
             except Exception as ge:
                 st.caption(f"금 시세 조회 실패: {ge}")
         if status.categories:
-            st.dataframe(
+            _df(
                 [
                     {
                         "자산군": c.name,
@@ -546,7 +548,7 @@ def render_holdings(cfg: KisConfig):
     if not balance.holdings:
         st.info("보유 중인 종목이 없습니다.")
     else:
-        st.dataframe(
+        _df(
             [
                 {
                     "종목명": h.name,
@@ -567,8 +569,8 @@ def render_holdings(cfg: KisConfig):
 
     s = balance.summary
     col1, col2, col3 = st.columns(3)
-    col1.metric("총평가금액", f"{s.total_eval_amount:,.0f}")
-    col2.metric("평가손익합계", f"{s.total_eval_profit_loss:,.0f}")
+    col1.metric("총평가금액", f"{s.total_eval_amount:,.0f}원")
+    col2.metric("평가손익합계", f"{s.total_eval_profit_loss:,.0f}원", pct_delta(s.total_eval_profit_loss, s.total_purchase_amount))
 
     st.markdown("**💰 예수금 (D / D+1 / D+2)**")
     if is_pension_account(cfg):
@@ -583,11 +585,11 @@ def render_holdings(cfg: KisConfig):
             # 표시하고, D/D+1/D+2는 일반 잔고조회 API가 주는 값을 그대로(가공 없이)
             # 보여준다 — D+2는 매매 결제로 추가 반영되는 금액이라 현금과는 성격이
             # 다른 별개의 값이라 합산하지 않는다(사용자 확인).
-            col3.metric("현금성 자산 (CMA)", f"{deposit.deposit_total:,.0f}")
+            col3.metric("현금성 자산 (CMA)", f"{deposit.deposit_total:,.0f}원")
             d_col1, d_col2, d_col3 = st.columns(3)
-            d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
-            d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
-            d_col3.metric("D+2 (결제예정금액)", f"{s.next_2day_withdrawable:,.0f}")
+            d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}원")
+            d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}원")
+            d_col3.metric("D+2 (결제예정금액)", f"{s.next_2day_withdrawable:,.0f}원")
             st.caption(
                 "퇴직연금(DC형) 계좌의 현금은 일반 잔고조회 API에 안 잡혀 전용 "
                 "예수금조회 API 값을 '현금성 자산'으로 표시합니다. D/D+1/D+2는 "
@@ -595,16 +597,44 @@ def render_holdings(cfg: KisConfig):
                 "추가로 반영될 금액(현금성 자산과는 별개)입니다."
             )
     else:
-        col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}")
+        col3.metric("현금성 자산 (CMA)", f"{s.cma_eval_amount:,.0f}원")
         st.caption(
             "국내 주식 결제가 T+2(매매일+2영업일)로 이뤄지는 것을 반영한 3단계 예수금입니다."
         )
         d_col1, d_col2, d_col3 = st.columns(3)
-        d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}")
-        d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}")
-        d_col3.metric("D+2 (최종 인출가능)", f"{s.next_2day_withdrawable:,.0f}")
+        d_col1.metric("D (예수금총액)", f"{s.deposit_total:,.0f}원")
+        d_col2.metric("D+1 (익일 인출가능)", f"{s.next_day_withdrawable:,.0f}원")
+        d_col3.metric("D+2 (최종 인출가능)", f"{s.next_2day_withdrawable:,.0f}원")
 
     return balance
+
+
+_MONEY_COLS = {
+    "현재가", "매입가", "평균단가", "평가금액", "평가손익", "매입금액", "매수금액", "매도금액", "순매수금액",
+    "시작 현금", "종료 현금", "현금 변화", "체결 순액(매도-매수)", "입출금·배당·이자 추정", "체결단가",
+    "체결금액", "단가", "거래금액", "수수료", "세금", "정산금액", "예수금잔고", "거래대금", "장부금액",
+    "평단(원)", "단가(원)", "금액", "외화 예수금", "출금가능", "매수단가(액면1만원당)", "시트", "API",
+    "차이(시트-API)",
+}
+
+
+def _money(v, usd: bool) -> str:
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return v if isinstance(v, str) else ("" if v is None or v != v else str(v))
+    return (f"-${-v:,.2f}" if v < 0 else f"${v:,.2f}") if usd else f"{v:,.0f}원"
+
+
+def _df(data, **kw):
+    """st.dataframe 래퍼 — 금액 열은 원화 `1,234,567원`(달러 행은 `$1,234.56`)로 쉼표와 단위를 붙여 보여 준다."""
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        rows = []
+        for r in data:
+            usd = str(r.get("통화", r.get("화폐", ""))) in ("USD", "달러")
+            rows.append({k: (_money(v, usd) if k in _MONEY_COLS else v) for k, v in r.items()})
+        data = rows
+        if any(k in data[0] for k in ("평가손익", "손익률(%)")):  # 손익 열은 부호별 색 (초록 +, 빨강 -)
+            data = styled_pl(data, ["평가손익", "손익률(%)", "순매수금액"])
+    return st.dataframe(data, **kw)
 
 
 def _na(title: str, msg: str):
@@ -617,11 +647,11 @@ def _summary_row(total, pl, purchase, cash, bond, note: str = ""):
     """모든 계좌 탭 맨 위에 같은 모양으로 그리는 5개 요약 지표."""
     st.subheader("📊 계좌 요약")
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("총평가 (주식+현금)", f"{total:,.0f}")
-    c2.metric("평가손익", f"{pl:,.0f}")
-    c3.metric("매입금액", f"{purchase:,.0f}")
-    c4.metric("예수금·현금", f"{cash:,.0f}")
-    c5.metric("채권 (매수금액)", f"{bond:,.0f}")
+    c1.metric("총평가 (주식+현금)", f"{total:,.0f}원")
+    c2.metric("평가손익", f"{pl:,.0f}원", pct_delta(pl, purchase))
+    c3.metric("매입금액", f"{purchase:,.0f}원")
+    c4.metric("예수금·현금", f"{cash:,.0f}원")
+    c5.metric("채권 (매수금액)", f"{bond:,.0f}원")
     st.caption("총평가에는 채권·펀드·해외주식이 포함되지 않습니다." + (f" {note}" if note else ""))
 
 
@@ -705,8 +735,8 @@ def render_bonds(cfg: KisConfig):
         st.caption("보유 중인 채권이 없거나 이 계좌 유형은 채권 조회를 지원하지 않습니다.")
         return
     total = sum(b.buy_amount for b in bonds)
-    st.metric("채권 매수금액 합계", f"{total:,.0f}")
-    st.dataframe(
+    st.metric("채권 매수금액 합계", f"{total:,.0f}원")
+    _df(
         [
             {
                 "종목명": b.name,
@@ -738,8 +768,8 @@ def render_funds(cfg: KisConfig):
     if not funds:
         st.caption("KIS API는 펀드를 제공하지 않습니다. funds.yaml에 적으면 여기에 표시됩니다.")
         return
-    st.metric("펀드 평가금액 합계", f"{sum(f.eval_amount for f in funds):,.0f}")
-    st.dataframe(
+    st.metric("펀드 평가금액 합계", f"{sum(f.eval_amount for f in funds):,.0f}원")
+    _df(
         [
             {
                 "펀드": f.name,
@@ -783,7 +813,7 @@ def render_cash_flow(cfg: KisConfig):
             for b in _safe_bonds(cfg)
         ]
     flows = infer_cash_flows(snaps, execs)
-    st.dataframe(
+    _df(
         [
             {
                 "구간": f"{f.start} → {f.end}",
@@ -824,7 +854,7 @@ def render_overseas(cfg: KisConfig):
         return
 
     if ob.holdings:
-        st.dataframe(
+        _df(
             [
                 {
                     "종목명": h.name,
@@ -848,7 +878,7 @@ def render_overseas(cfg: KisConfig):
         st.info("보유 중인 해외주식이 없습니다.")
 
     if ob.cash:
-        st.dataframe(
+        _df(
             [
                 {"통화": c.currency, "외화 예수금": c.deposit, "출금가능": c.withdrawable}
                 for c in ob.cash
@@ -859,9 +889,9 @@ def render_overseas(cfg: KisConfig):
         )
     s = ob.summary
     c1, c2, c3 = st.columns(3)
-    c1.metric("총자산 (원화환산)", f"{s.total_asset_krw:,.0f}")
-    c2.metric("총예수금 (원화환산)", f"{s.total_deposit_krw:,.0f}")
-    c3.metric("해외 평가손익 (원화)", f"{s.eval_profit_loss_krw:,.0f}")
+    c1.metric("총자산 (원화환산)", f"{s.total_asset_krw:,.0f}원")
+    c2.metric("총예수금 (원화환산)", f"{s.total_deposit_krw:,.0f}원")
+    c3.metric("해외 평가손익 (원화)", f"{s.eval_profit_loss_krw:,.0f}원", pct_delta(s.eval_profit_loss_krw, s.purchase_amount_krw))
 
     try:
         execs = _overseas_executions(cfg, 90)
@@ -872,7 +902,7 @@ def render_overseas(cfg: KisConfig):
     if not execs:
         st.info("최근 90일간 해외주식 체결내역이 없습니다.")
     else:
-        st.dataframe(
+        _df(
             [
                 {
                     "일자": x.date,
@@ -908,9 +938,9 @@ def render_kis_executions(cfg: KisConfig):
     sells = sum(r.amount for r in records if r.side == "매도")
     c1, c2, c3 = st.columns(3)
     c1.metric("체결 건수", f"{len(records)}건", f"{records[-1].date} ~ {records[0].date}")
-    c2.metric("누적 매수금액", f"{buys:,.0f}")
-    c3.metric("누적 매도금액", f"{sells:,.0f}")
-    st.dataframe(
+    c2.metric("누적 매수금액", f"{buys:,.0f}원")
+    c3.metric("누적 매도금액", f"{sells:,.0f}원")
+    _df(
         [
             {
                 "일자": r.date,
@@ -946,7 +976,7 @@ def render_toss_account(cfg):
     )
     st.subheader("보유 종목")
     if acct.holdings:
-        st.dataframe(
+        _df(
             [
                 {"종목명": h.name, "종목코드": h.symbol, "국가": h.country, "통화": h.currency,
                  "수량": h.quantity, "매입가": h.avg_price, "현재가": h.last_price,
@@ -969,7 +999,7 @@ def render_toss_account(cfg):
         st.warning(f"주문 내역 조회 실패: {e}")
         orders = []
     if orders:
-        st.dataframe(
+        _df(
             [
                 {"일시": o.ordered_at.strftime("%Y-%m-%d %H:%M"), "구분": "매수" if o.side == "BUY" else "매도",
                  "종목": o.symbol, "수량": o.filled_quantity, "체결단가": o.avg_fill_price,
@@ -982,7 +1012,50 @@ def render_toss_account(cfg):
         st.info("체결된 주문이 없습니다.")
     _na("💵 예수금 스냅샷 · 입출금/배당 추정", "토스는 스냅샷 기록 대상이 아닙니다 (한투 계좌만).")
     _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
-    _na("📝 매매 내역 (수동 기록)", "한투 계좌에서만 제공합니다.")
+
+
+def render_mirae_account():
+    """미래에셋(수동 입력 `mirae.csv`) — API가 없어 장부금액 기준으로만 보여 준다."""
+    rows = load_ledger()
+    if not rows:
+        st.info("`mirae.csv`가 없습니다. `mirae.csv.example` 형식으로 레포 루트에 만들어 주세요.")
+        return
+    positions = aggregate(rows)
+    total = sum(p.total for p in positions)
+    cash_kinds = ("예수금", "RP", "CMA")
+    cash = sum(p.total for p in positions if any(k in p.name for k in cash_kinds))
+    _summary_row(
+        total, 0, total, cash, 0,
+        "수동 입력 장부금액(시트 '산총합') 기준이며 현재가가 없어 평가손익은 계산하지 않습니다. "
+        f"기준일: {max(r.date for r in rows)}",
+    )
+    st.subheader("보유 종목 (행 합산)")
+    _df(
+        [
+            {"종류": p.kind, "종목": p.name, "티커": p.ticker, "화폐": p.currency,
+             "수량": p.quantity, "평단(원)": round(p.avg_price), "장부금액": p.total}
+            for p in sorted(positions, key=lambda p: -p.total)
+        ],
+        width="stretch", hide_index=True, key="mirae_positions",
+    )
+    by_kind: dict[str, float] = {}
+    for p in positions:
+        by_kind[p.kind] = by_kind.get(p.kind, 0) + p.total
+    st.caption("통장 종류별 장부금액: " + " · ".join(f"{k} {v:,.0f}" for k, v in by_kind.items()))
+    st.subheader("📒 매매·잔고 원장 (입력 순)")
+    _df(
+        [
+            {"날짜": r.date, "종류": r.kind, "종목": r.name, "티커": r.ticker, "화폐": r.currency,
+             "수량": r.quantity, "단가(원)": r.price, "금액": r.total}
+            for r in rows
+        ],
+        width="stretch", hide_index=True, key="mirae_ledger",
+    )
+    _na("🧾 채권 보유 (매수 내역)", "수동 원장 계좌입니다 (위 보유 종목에 포함).")
+    _na("🏦 펀드 (수동 기록)", "수동 원장 계좌입니다 (위 보유 종목에 포함).")
+    _na("🌏 해외주식 / 외화", "달러 종목은 위 표의 '화폐' 열로 구분합니다 (금액은 원화 환산).")
+    _na("💵 예수금 스냅샷 · 입출금/배당 추정", "한투 계좌에서만 제공합니다.")
+    _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
 
 
 def render_kiwoom_account(cfg: KiwoomConfig):
@@ -1001,7 +1074,7 @@ def render_kiwoom_account(cfg: KiwoomConfig):
                  f"주문가능 {s.orderable:,.0f}원 · 출금가능 {s.withdrawable:,.0f}원")
     st.subheader("보유 종목")
     if bal.holdings:
-        st.dataframe(
+        _df(
             [
                 {
                     "종목명": h.name,
@@ -1038,7 +1111,7 @@ def render_kiwoom_account(cfg: KiwoomConfig):
     trades = [r for r in history if r.is_trade]
     st.markdown(f"**매매 내역** ({len(trades)}건)")
     if trades:
-        st.dataframe(
+        _df(
             [
                 {
                     "일자": r.date,
@@ -1060,7 +1133,7 @@ def render_kiwoom_account(cfg: KiwoomConfig):
     else:
         st.info("매매 내역이 없습니다.")
     with st.expander(f"전체 거래 원장 (입출금·배당 포함, {len(history)}건, {history[-1].date} ~ {history[0].date})"):
-        st.dataframe(
+        _df(
             [
                 {
                     "일자": r.date,
@@ -1126,7 +1199,7 @@ def render_manual_transactions(cfg: KisConfig):
     st.plotly_chart(fig, width="stretch", key=f"manual_tx_chart_{cfg.account_no}")
 
     st.markdown("**종목별 매매 비교**")
-    st.dataframe(
+    _df(
         [
             {
                 "종목명": s["name"],
@@ -1144,7 +1217,7 @@ def render_manual_transactions(cfg: KisConfig):
     )
 
     with st.expander("전체 매매 기록 원장"):
-        st.dataframe(
+        _df(
             [
                 {
                     "날짜": t.date,
@@ -1229,11 +1302,11 @@ def render_candles(cfg: KisConfig, codes: list[tuple[str, str]]):
 
 # 시트의 통장명 → 이 앱의 한투/키움 계좌 라벨 (API로 조회되는 계좌만 대조한다)
 _SHEET_TO_API = {
-    "한투 DC": "DC 계좌",
-    "한투 ISA": "ISA",
-    "한투 현물투자전용": "금현물",
-    "한투": "위탁계좌",
-    "한투 CMA": "CMA",
+    "한투 DC": "한투 DC",
+    "한투 ISA": "한투 ISA",
+    "한투 현물투자전용": "한투 금현물",
+    "한투": "한투 위탁계좌",
+    "한투 CMA": "한투 CMA",
     "키움저축연금5312-8040": "키움 연금저축(Old)",
     "키움키움저축연금5420-0864": "키움 연금저축(New)",
 }
@@ -1262,16 +1335,16 @@ def render_sheet(configs: list[KisConfig], kiwoom_configs: list[KiwoomConfig], t
             toss_names = set()
         sheet_only = [r for r in sheet_only if not (r.broker == "토스" and r.name in toss_names)]
     st.markdown("**API로 조회되지 않는 자산 (시트 기준)**")
-    st.metric("합계", f"{sum(r.eval_amount for r in sheet_only):,.0f}")
+    st.metric("합계", f"{sum(r.eval_amount for r in sheet_only):,.0f}원")
     by_acct: dict[tuple[str, str], float] = {}
     for r in sheet_only:
         by_acct[(r.broker, r.account)] = by_acct.get((r.broker, r.account), 0) + r.eval_amount
-    st.dataframe(
+    _df(
         [{"증권사": b, "통장": a, "평가금액": v} for (b, a), v in sorted(by_acct.items(), key=lambda x: -x[1])],
         width="stretch", hide_index=True, key="sheet_only_accounts",
     )
     with st.expander(f"종목별 상세 ({len(sheet_only)}행)"):
-        st.dataframe(
+        _df(
             [
                 {"증권사": r.broker, "통장": r.account, "종목": r.name, "수량": r.quantity,
                  "매수일": r.buy_date, "매수금액": r.buy_total, "평가금액": r.eval_amount, "메모": r.note}
@@ -1303,7 +1376,7 @@ def render_sheet(configs: list[KisConfig], kiwoom_configs: list[KiwoomConfig], t
     for label, api in compare:
         sv = sheet_sum.get(label)
         table.append({"계좌": label, "시트": sv, "API": api, "차이(시트-API)": None if sv is None or api is None else sv - api})
-    st.dataframe(table, width="stretch", hide_index=True, key="sheet_compare")
+    _df(table, width="stretch", hide_index=True, key="sheet_compare")
     st.caption(
         "API 값 = 주식 평가 + 현금 + 채권 매수금액. 시트의 'DC 계좌 현금' 행이 매수 후에도 줄지 않으면 "
         "DC 차이가 크게 나타납니다 (이중 계상)."
@@ -1332,140 +1405,6 @@ def _kiwoom_total(cfg: KiwoomConfig):
         return None
 
 
-def render_portfolio_rebalance(cfg: KisConfig):
-    """"🎯 목표 포트폴리오 리밸런싱" 섹션.
-
-    회차당 `CONTRIBUTION_PER_ROUND`(11,000,000원)를 목표 비중(TDF2050 20% /
-    TDF2035 20% / 나스닥100 20% / S&P500 40% / 금현물 10%)에 맞춰 배분한다.
-    ETF 3종은 KIS 시세를 그대로 쓰고, TDF 펀드 2종은 KIS API가 펀드 시세를
-    지원하지 않아 사용자가 직접 입력한 기준가(`fund_nav.csv`)를 쓴다. 이
-    섹션은 계좌 탭과 무관한 개인 목표 포트폴리오 계획이라 특정 계좌에 종속되지
-    않고(`cfg`는 시세 조회용 토큰만 빌려 씀) 페이지에 한 번만 렌더링된다.
-    """
-    st.subheader("🎯 목표 포트폴리오 리밸런싱")
-    st.caption(
-        f"회차당 {CONTRIBUTION_PER_ROUND:,.0f}원 투자, 목표 비중: "
-        + " · ".join(f"{a.name} {a.weight_pct:.0f}%" for a in TARGET_ASSETS)
-        + ". 이미 산 만큼을 반영해 다음 회차 매수 금액을 계산합니다."
-    )
-
-    live_prices: dict[str, float] = {}
-    for asset in TARGET_ASSETS + [EXISTING_CASH_PARK]:
-        if not asset.code:
-            continue
-        try:
-            candles = _candles(cfg, asset.code, 5)
-            if candles:
-                live_prices[asset.key] = candles[-1].close
-        except Exception as e:
-            st.warning(f"{asset.name} 시세 조회 실패: {e}")
-
-    fund_nav = load_fund_nav()
-    with st.expander("📌 펀드 기준가(NAV) 직접 입력 — KIS API가 펀드 시세를 지원하지 않음"):
-        st.caption("한투 앱이나 펀드 사이트에서 확인한 오늘 기준가를 입력하세요.")
-        for asset in TARGET_ASSETS:
-            if asset.asset_type != "fund":
-                continue
-            existing_nav, existing_date = fund_nav.get(asset.key, (0.0, dt.date.today()))
-            nc1, nc2, nc3 = st.columns([2, 1, 1])
-            nc1.write(f"**{asset.name}**  \n마지막 입력: {existing_date} = {existing_nav:,.2f}")
-            new_nav = nc2.number_input(
-                "기준가", min_value=0.0, value=float(existing_nav), key=f"nav_input_{asset.key}"
-            )
-            if nc3.button("저장", key=f"nav_save_{asset.key}"):
-                save_fund_nav(asset.key, new_nav, dt.date.today())
-                st.rerun()
-
-    current_prices = dict(live_prices)
-    for key, (nav, _as_of) in fund_nav.items():
-        current_prices[key] = nav
-
-    purchases = load_purchases()
-    positions = build_positions(purchases, current_prices)
-
-    with st.form("portfolio_purchase_form"):
-        st.markdown("**📝 매수 기록 입력**")
-        all_assets = TARGET_ASSETS + [EXISTING_CASH_PARK]
-        asset_options = {f"{a.name} ({a.code or '펀드'})": a.key for a in all_assets}
-        selected_name = st.selectbox("종목/펀드", list(asset_options.keys()))
-        p_date = st.date_input("매수일", value=dt.date.today())
-        p_qty = st.number_input("수량/좌수 (펀드는 몰라도 0으로 두고 금액만 기록 가능)", min_value=0.0, value=0.0, step=1.0)
-        p_price = st.number_input("매수 단가(원, 펀드는 기준가)", min_value=0.0, value=0.0, step=1.0)
-        p_amount = st.number_input("매수 금액(원)", min_value=0.0, value=0.0, step=10000.0)
-        p_note = st.text_input("메모", value="")
-        submitted = st.form_submit_button("기록 저장")
-        if submitted:
-            if p_amount <= 0:
-                st.error("매수 금액을 입력하세요.")
-            else:
-                append_purchase(
-                    PurchaseRecord(
-                        date=p_date,
-                        asset_key=asset_options[selected_name],
-                        quantity=p_qty,
-                        price=p_price,
-                        amount=p_amount,
-                        note=p_note,
-                    )
-                )
-                st.success("저장했습니다.")
-                st.rerun()
-
-    st.markdown("**📊 매입 대비 현재 수익률**")
-    total_invested = sum(p.invested_amount for p in positions)
-    total_current = sum(p.current_value or 0 for p in positions)
-    rows = [
-        {
-            "자산": p.asset.name,
-            "티커": p.asset.code or "-",
-            "보유수량": p.quantity or None,
-            "매입총액": p.invested_amount,
-            "현재가/기준가": p.current_price,
-            "평가금액": p.current_value,
-            "손익": p.profit_loss,
-            "수익률(%)": p.profit_loss_rate,
-        }
-        for p in positions
-    ]
-    rows.append(
-        {
-            "자산": "합계",
-            "티커": "",
-            "보유수량": None,
-            "매입총액": total_invested,
-            "현재가/기준가": None,
-            "평가금액": total_current,
-            "손익": (total_current - total_invested) if total_invested else None,
-            "수익률(%)": ((total_current - total_invested) / total_invested * 100) if total_invested else None,
-        }
-    )
-    st.dataframe(rows, width="stretch", hide_index=True, key="portfolio_return_table")
-
-    st.markdown(f"**🛒 다음 회차 매수 계획 (총 {CONTRIBUTION_PER_ROUND:,.0f}원)**")
-    plan = compute_rebalance_plan(positions)
-    plan_rows = [
-        {
-            "자산": item.asset.name,
-            "티커": item.asset.code or "-",
-            "목표비중": f"{item.asset.weight_pct:.0f}%",
-            "현재평가금액": item.current_value,
-            "목표금액": item.target_value,
-            "매수필요금액": item.buy_amount,
-            "단가": item.price,
-            "매수수량": item.buy_quantity,
-            "실제매수금액": item.actual_cost,
-            "잔액": item.leftover,
-        }
-        for item in plan
-    ]
-    st.dataframe(plan_rows, width="stretch", hide_index=True, key="portfolio_plan_table")
-    st.caption(
-        "펀드는 정수 좌수 개념이 없어 '매수수량'이 비어 있습니다 — 계산된 '매수필요금액'만큼 "
-        "증권사 앱에서 '금액 매수'로 신청하면 됩니다. ACE KRX금현물은 실제 KRX 금현물시장(별도 "
-        "계좌 필요)의 대리 자산으로 쓴 상장 ETF입니다."
-    )
-
-
 def render_account_section(cfg: KisConfig):
     """계좌 하나에 대한 "보유 종목 + 투자 스타일 진단 + 수동 매매기록"을
     묶어서 렌더링하고, 캔들차트 종목 선택지 구성에 쓸 `AccountBalance`를
@@ -1485,7 +1424,6 @@ def render_account_section(cfg: KisConfig):
         _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "종목별 잔고가 없는 계좌라 진단할 수 없습니다.")
     else:
         render_investment_style(cfg, balance)
-    render_manual_transactions(cfg)
     return balance
 
 
@@ -1506,6 +1444,21 @@ def main():
     if not check_password():
         return
 
+    mode = st.radio(
+        "보기 선택",
+        ["1️⃣ 실시간 (지금 조회)", "2️⃣ 일일 리포트 (매일 새벽 2시 저장본)"],
+        horizontal=True, key="view_mode", index=1,
+    )
+    if mode.startswith("2"):
+        st.title("hantoo 일일 리포트")
+        render_daily_report()
+        return
+    render_live()
+
+
+def render_live():
+    """모드 1 — 접속할 때마다 증권사 API에서 직접 조회하는 실시간 화면."""
+    inject_tab_css()
     # 페이지를 새로 열거나 F5로 새로고침하면 Streamlit이 새 세션을 만들어
     # `session_state`가 비어 있다. 이때 한 번만 데이터 캐시를 비워서 TTL이 남아
     # 있어도 최신 값을 다시 조회하게 한다. 같은 세션 안의 위젯 조작(리런)은
@@ -1541,29 +1494,36 @@ def main():
     all_holdings = []
     kiwoom_configs = load_kiwoom_configs()
     toss_cfg = load_toss_config()
-    if len(configs) == 1 and not kiwoom_configs and not toss_cfg:
+    has_mirae = bool(load_ledger())
+    if len(configs) == 1 and not kiwoom_configs and not toss_cfg and not has_mirae:
         balance = render_account_section(configs[0])
         if balance is not None:
             all_holdings.extend(balance.holdings)
     else:
         labels = [c.display_label for c in configs] + [
             f"키움 {c.display_label}" for c in kiwoom_configs
-        ] + ([toss_cfg.display_label] if toss_cfg else [])
+        ] + ([toss_cfg.display_label] if toss_cfg else []) + (["미래에셋 (수동)"] if has_mirae else [])
         tabs = st.tabs(labels)
-        for tab, cfg in zip(tabs, configs):
+        for i, (tab, cfg) in enumerate(zip(tabs, configs)):
             with tab:
+                tab_marker(i)
                 balance = render_account_section(cfg)
                 if balance is not None:
                     all_holdings.extend(balance.holdings)
-        for tab, kcfg in zip(tabs[len(configs):], kiwoom_configs):
+        for i, (tab, kcfg) in enumerate(zip(tabs[len(configs):], kiwoom_configs), start=len(configs)):
             with tab:
+                tab_marker(i)
                 render_kiwoom_account(kcfg)
                 _na("💵 예수금 스냅샷 · 입출금/배당 추정", "키움은 위 '전체 거래 원장'에 입출금·배당·이자와 예수금잔고가 직접 나옵니다.")
                 _na("🧭 내 투자 스타일 진단 (분산도 · 매매빈도)", "한투 계좌에서만 제공합니다.")
-                _na("📝 매매 내역 (수동 기록)", "한투 계좌에서만 제공합니다 (키움은 API로 전체 거래가 조회됨).")
         if toss_cfg:
             with tabs[len(configs) + len(kiwoom_configs)]:
+                tab_marker(len(configs) + len(kiwoom_configs))
                 render_toss_account(toss_cfg)
+        if has_mirae:
+            with tabs[-1]:
+                tab_marker(len(tabs) - 1)
+                render_mirae_account()
 
     render_sheet(configs, kiwoom_configs, toss_cfg)
 
@@ -1575,8 +1535,6 @@ def main():
     for w in watchlist:
         code_to_name.setdefault(w.code, w.name or w.code)
     render_candles(primary_cfg, list(code_to_name.items()))
-
-    render_portfolio_rebalance(primary_cfg)
 
     with st.expander("ℹ️ 관리 정보"):
         st.markdown(

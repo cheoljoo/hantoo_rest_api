@@ -62,7 +62,15 @@ def _oauth_credentials():
 
     creds = Credentials.from_authorized_user_file(path)
     if not creds.valid:
-        creds.refresh(Request())
+        from google.auth.exceptions import RefreshError
+
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            raise RuntimeError(
+                "구글 OAuth 토큰이 만료/취소되었습니다 (동의 화면이 '테스트'면 7일마다 만료). "
+                "`uv run hantoo-gsheet-auth url` → `... code \"<주소>\"`로 다시 발급하세요"
+            ) from e
         with open(path, "w") as f:
             f.write(creds.to_json())
     return creds

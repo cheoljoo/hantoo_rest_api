@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 hantoo-rest-api = "hantoo_rest_api:main"
 hantoo-snapshot = "hantoo_rest_api.snapshot:main"
+hantoo-daily = "hantoo_rest_api.daily:main"
 hantoo-gsheet-auth = "hantoo_rest_api.gsheet_auth:main"
 
 [build-system]
