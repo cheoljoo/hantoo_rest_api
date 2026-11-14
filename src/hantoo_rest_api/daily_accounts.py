@@ -205,6 +205,17 @@ def _mirae(fx: float, us_prices: dict[str, float]) -> AccountSnap | None:
     return snap
 
 
+CASH_LIKE_KEYWORDS = ("CD금리",)  # 사용자 기준 현금 취급 상품 (예: KODEX CD금리액티브)
+
+
+def _cash_like(snap: AccountSnap) -> None:
+    """현금으로 취급하는 ETF를 '현금' 항목으로 옮기고 예수금·현금에 더한다 (총평가는 이미 포함돼 있어 그대로)."""
+    for p in snap.positions:
+        if p.kind == "주식" and any(k in p.name for k in CASH_LIKE_KEYWORDS):
+            p.kind = "현금"
+            snap.cash += p.eval
+
+
 def collect_accounts(fx: float, us_prices: dict[str, float] | None = None) -> list[AccountSnap]:
     """`fx`: 당일 원/달러. 모든 계좌의 미국 주식을 같은 환율로 원화 환산한다."""
     out: list[AccountSnap] = []
@@ -221,4 +232,6 @@ def collect_accounts(fx: float, us_prices: dict[str, float] | None = None) -> li
     mirae = _mirae(fx, us_prices or {})
     if mirae:
         out.append(mirae)
+    for snap in out:
+        _cash_like(snap)
     return out
