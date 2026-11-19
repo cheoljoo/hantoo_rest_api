@@ -241,3 +241,6 @@ sheets-sa*.json
 # 일일 리포트 DB (개인 금융정보)
 data/
 daily.log
+
+# 카드 분석 리포트 symlink (개인 금융정보)
+web/card-analysis.html

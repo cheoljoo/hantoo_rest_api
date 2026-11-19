@@ -178,6 +178,34 @@ def _render_indicators(inds: list[dict], report_date: str) -> None:
             )
 
 
+_HOLD_KINDS = ("주식", "금", "펀드")
+
+
+def _holdings(positions: list[dict]) -> dict[str, dict]:
+    """종목 이름별 평가·매입·손익 합계 (주식·ETF·금·펀드만; 현금·채권 제외)."""
+    out: dict[str, dict] = {}
+    for p in positions:
+        if p["kind"] not in _HOLD_KINDS:
+            continue
+        h = out.setdefault(p["name"].replace(" ", ""), {"name": p["name"], "eval": 0.0, "purchase": 0.0, "pl": 0.0})
+        h["eval"] += p["eval"]
+        h["purchase"] += p["purchase"]
+        h["pl"] += p["pl"]
+    return out
+
+
+def _pie_slices(holds: dict[str, dict], top: int = 10) -> tuple[list[str], list[float]]:
+    """평가액 상위 `top`개만 따로 두고 나머지는 '기타'로 묶는다."""
+    ranked = sorted(holds.items(), key=lambda kv: -kv[1]["eval"])
+    names = [h["name"] for _, h in ranked[:top]]
+    vals = [h["eval"] for _, h in ranked[:top]]
+    rest = sum(h["eval"] for _, h in ranked[top:])
+    if rest > 0:
+        names.append(f"기타 {len(ranked) - top}종목")
+        vals.append(rest)
+    return names, vals
+
+
 def _render_account(label: str, acct: dict, positions: list[dict], idx: int, fx: float) -> None:
     tab_marker(idx)
     if acct["error"]:
@@ -207,9 +235,18 @@ def _render_account(label: str, acct: dict, positions: list[dict], idx: int, fx:
     kinds: dict[str, float] = {}
     for p in positions:
         kinds[p["kind"]] = kinds.get(p["kind"], 0) + p["eval"]
+    holds = _holdings(positions)
+    left, right = st.columns(2)
     fig = px.pie(names=list(kinds), values=list(kinds.values()), hole=0.45, title="자산군 비중")
-    fig.update_layout(height=300, margin=dict(t=40, b=0, l=0, r=0))
-    st.plotly_chart(fig, width="stretch", key=f"pie_{label}")
+    fig.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0))
+    left.plotly_chart(fig, width="stretch", key=f"pie_{label}")
+    if holds:
+        names, vals = _pie_slices(holds)
+        fig = px.pie(names=names, values=vals, hole=0.45, title="종목별 비중 (주식·ETF·금·펀드)")
+        fig.update_layout(height=320, margin=dict(t=40, b=0, l=0, r=0))
+        right.plotly_chart(fig, width="stretch", key=f"pie_hold_{label}")
+    else:
+        right.caption("주식·ETF·금·펀드 보유가 없어 종목별 비중은 그리지 않습니다.")
 
 
 def _render_analysis(date: str, data: dict) -> None:
@@ -238,10 +275,25 @@ def _render_analysis(date: str, data: dict) -> None:
     right.plotly_chart(fig, width="stretch", key="an_broker")
 
     st.markdown("**상위 보유 종목**")
-    st.dataframe(
-        [{"종목": t["name"], "평가(원)": f'{t["eval"]:,.0f}원', "비중(%)": round(t["weight"], 2)} for t in s["top_holdings"]],
-        width="stretch", hide_index=True, key="an_top",
-    )
+    holds = _holdings(data["positions"])
+    total = s["total"] or 1
+    top_rows = sorted(holds.items(), key=lambda kv: -kv[1]["eval"])[:10]
+    if top_rows:
+        st.dataframe(
+            styled_pl(
+                [{"종목": h["name"], "매입가(원)": f'{h["purchase"]:,.0f}원', "평가(원)": f'{h["eval"]:,.0f}원',
+                  "손익(원)": f'{h["pl"]:,.0f}원',
+                  "손익률": f'{h["pl"] / h["purchase"] * 100:+.2f}%' if h["purchase"] else "-",
+                  "비중(%)": round(h["eval"] / total * 100, 2)} for n, h in top_rows],
+                ["손익(원)", "손익률"]),
+            width="stretch", hide_index=True, key="an_top",
+        )
+        st.caption("여러 계좌에 나뉜 같은 종목은 합산합니다. 매입가는 총 매입금액, 미래에셋 원화 장부 항목은 매입=평가라 손익이 0입니다.")
+    names, vals = _pie_slices(holds)
+    if names:
+        fig = px.pie(names=names, values=vals, hole=0.45, title="종목별 비중 (전체 계좌 합산)")
+        fig.update_layout(height=340, margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig, width="stretch", key="an_hold_pie")
     hist = daily_db.total_history()
     dates = sorted({h["date"] for h in hist})
     if len(dates) >= 2:

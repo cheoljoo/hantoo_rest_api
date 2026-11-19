@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))  # daily_view, ui_style (AppTest/
 import extra_streamlit_components as stx
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from hantoo_rest_api.account import get_account_balance
 from hantoo_rest_api.account_activity import (
@@ -88,6 +89,8 @@ from types import SimpleNamespace
 SECRETS_PATH = Path(__file__).parent / ".streamlit" / "secrets.toml"
 DEFAULT_PASSWORD = "2222"
 ICON_PATH = Path(__file__).parent / "assets" / "kis_icon.png"
+# 카드 분석 리포트(개인 금융정보). 원본 파일로 가는 symlink라 git에는 올리지 않는다.
+CARD_REPORT_PATH = Path(__file__).parent / "card-analysis.html"
 GITHUB_URL = "https://github.com/cheoljoo/hantoo_rest_api"
 OWNER_NAME = "이철주"
 OWNER_EMAIL = "cheoljoo@gmail.com"
@@ -1446,14 +1449,28 @@ def main():
 
     mode = st.radio(
         "보기 선택",
-        ["1️⃣ 실시간 (지금 조회)", "2️⃣ 일일 리포트 (매일 새벽 2시 저장본)"],
+        ["1️⃣ 실시간 (지금 조회)", "2️⃣ 일일 리포트 (매일 새벽 2시 저장본)", "3️⃣ 카드 분석"],
         horizontal=True, key="view_mode", index=1,
     )
+    if mode.startswith("3"):
+        st.title("KB카드 지출 분석")
+        render_card_report()
+        return
     if mode.startswith("2"):
         st.title("hantoo 일일 리포트")
         render_daily_report()
         return
     render_live()
+
+
+def render_card_report() -> None:
+    """모드 3 — `card-analysis.html`을 비밀번호 게이트 안쪽에서 iframe으로 보여 준다."""
+    try:
+        html = CARD_REPORT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        st.warning("web/card-analysis.html 을 읽을 수 없습니다 (symlink 대상 파일이 없는지 확인하세요).")
+        return
+    components.html(html, height=7600, scrolling=True)
 
 
 def render_live():
