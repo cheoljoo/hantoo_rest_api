@@ -34,7 +34,7 @@ class OverseasHolding:
     name: str  # prdt_name
     market: str  # tr_mket_name
     currency: str  # buy_crcy_cd
-    quantity: float  # cblc_qty13
+    quantity: float  # ccld_qty_smtl1 (체결기준; 결제 전인 신규 매수는 cblc_qty13 이 0)
     avg_price: float  # avg_unpr3
     current_price: float  # ovrs_now_pric1
     purchase_amount: float  # frcr_pchs_amt
@@ -122,7 +122,7 @@ def get_overseas_balance(cfg: KisConfig, access_token: str) -> OverseasBalance:
             name=i.get("prdt_name", "") or i.get("pdno", ""),
             market=i.get("tr_mket_name", ""),
             currency=i.get("buy_crcy_cd", ""),
-            quantity=_f(i, "cblc_qty13"),
+            quantity=_f(i, "ccld_qty_smtl1") or _f(i, "cblc_qty13"),
             avg_price=_f(i, "avg_unpr3"),
             current_price=_f(i, "ovrs_now_pric1"),
             purchase_amount=_f(i, "frcr_pchs_amt"),
@@ -131,7 +131,7 @@ def get_overseas_balance(cfg: KisConfig, access_token: str) -> OverseasBalance:
             eval_profit_loss_rate=_f(i, "evlu_pfls_rt1"),
         )
         for i in data.get("output1") or []
-        if _f(i, "cblc_qty13") > 0
+        if (_f(i, "ccld_qty_smtl1") or _f(i, "cblc_qty13")) > 0
     ]
     cash = [
         ForeignCash(

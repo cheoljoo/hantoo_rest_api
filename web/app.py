@@ -1449,9 +1449,15 @@ def main():
 
     mode = st.radio(
         "보기 선택",
-        ["1️⃣ 실시간 (지금 조회)", "2️⃣ 일일 리포트 (매일 새벽 2시 저장본)", "3️⃣ 카드 분석"],
+        ["1️⃣ 실시간 (지금 조회)", "2️⃣ 일일 리포트 (매일 새벽 2시 저장본)", "3️⃣ 카드 분석", "4️⃣ 투자 전략 (서대리·서준식·김영익)"],
         horizontal=True, key="view_mode", index=1,
     )
+    if mode.startswith("4"):
+        from strategy_view import render_strategies
+
+        st.title("투자 전략 — 내 현금을 어떻게 나눌까")
+        render_strategies()
+        return
     if mode.startswith("3"):
         st.title("KB카드 지출 분석")
         render_card_report()
